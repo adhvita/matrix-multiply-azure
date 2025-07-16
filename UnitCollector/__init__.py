@@ -1,0 +1,14 @@
+import azure.functions as func
+import json
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'shared_lib'))
+from strassen_unit_collector import unit_collector_handler
+
+def main(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        req_body = req.get_json()
+        result = unit_collector_handler(req_body)
+        return func.HttpResponse(json.dumps({"result": result}), status_code=200)
+    except Exception as e:
+        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
