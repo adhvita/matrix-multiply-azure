@@ -48,6 +48,16 @@ def main(inputblob: func.InputStream, outputblob: func.Out[str]):
         return func.HttpResponse(
             json.dumps({"result": result}),
             mimetype="application/json")
+    
+        outputblob.set(json.dumps(results))           # keep writing to Blob
+        return func.HttpResponse(                     # send a nice HTTP answer
+            json.dumps({
+                "pairsProcessed": len(results),
+                "results": results[:3]                # maybe sample the first 3 results
+            }),
+            mimetype="application/json",
+            status_code=200
+            )
 
     except Exception as e:
         logging.exception(" Error processing synthetic dataset")
