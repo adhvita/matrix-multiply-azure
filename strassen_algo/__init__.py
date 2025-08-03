@@ -10,7 +10,6 @@ def main(inputblob: func.InputStream, outputblob: func.Out[str]):
         # Step 1: Read the full synthetic_dataset.json content
         logging.info("Function triggered")
         content = inputblob.read().decode('utf-8')
-        # content = "/Users/adhvita/Documents/multiply-matrix/matrices1.json"
         matrix_pairs = json.loads(content)
 
         results = []
