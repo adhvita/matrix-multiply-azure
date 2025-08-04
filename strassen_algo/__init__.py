@@ -3,7 +3,8 @@ import json
 import numpy as np
 import azure.functions as func
 from strassen_algo.strassen_module import strassen
-from datetime import datetime
+from datetime import datetime, timezone
+
 
 def main(inputblob: func.InputStream, outputblob: func.Out[str]):
     try:
@@ -36,7 +37,7 @@ def main(inputblob: func.InputStream, outputblob: func.Out[str]):
 
         # Step 3: Save results to output blob
         output_data = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "num_pairs": len(results),
             "results": results
         }
