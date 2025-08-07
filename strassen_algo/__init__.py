@@ -43,12 +43,8 @@ def main(inputblob: func.InputStream, outputblob: func.Out[str]):
         }
 
         outputblob.set(json.dumps(output_data, indent=2))
-        logging.info(f"✅ Processed {len(results)} matrix pairs from {inputblob.name}")
-
-        result = strassen_multiply(matrix_a, matrix_b)
-        return func.HttpResponse(
-            json.dumps({"result": result}),
-            mimetype="application/json")
+        logging.info("Processed %d matrix pairs from %s",
+                     len(results), inputblob.name)
     
     except Exception as e:
         logging.exception(" Error processing synthetic dataset")
