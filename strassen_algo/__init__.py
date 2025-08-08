@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 def main(inputblob: func.InputStream, outputblob: func.Out[str]):
     try:
-        time.sleep(5)
+        time.sleep(10)
         logging.info("Function triggered: Reading input blob '%s'", inputblob.name)
         # Step 1: Read the full synthetic_dataset.json content
         logging.info("Function triggered")
