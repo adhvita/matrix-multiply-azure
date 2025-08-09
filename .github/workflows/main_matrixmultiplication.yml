@@ -82,6 +82,22 @@ jobs:
           find . -maxdepth 3 -name function.json -print
           echo "== host.json & requirements.txt =="
           ls -la host.json requirements.txt
+          - name: Vendor Python deps
+          run: |
+            python -m pip install --upgrade pip
+            pip install --no-cache-dir -r requirements.txt \
+              --target ".python_packages/lib/site-packages"
+            python -c "import numpy; print('numpy in runner:', __import__('numpy').__version__)"
+        
+        # (Optional) List what will be deployed
+      - name: List payload
+        run: |
+            echo "function.json files:" && find . -maxdepth 3 -name function.json
+            echo "numpy vendor path:" && python - <<'PY'
+            import os, sys, glob
+            matches = glob.glob(".python_packages/lib/site-packages/numpy/__init__.py")
+            print(matches or "NOT FOUND")
+            PY
         
       - name: 'Deploy to Azure Functions'
         uses: Azure/functions-action@v1
