@@ -29,6 +29,17 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+        # Install dependencies
+      - name: Install dependencies
+        run: |
+            python -m pip install --upgrade pip
+            pip install -r requirements.txt
+    
+      # Verify numpy installed (optional safety check)
+      - name: Verify numpy installation
+        run: python -c "import numpy; print('✅ numpy version:', numpy.__version__)"
+    
+
       - name: Create and start virtual environment
         run: |
           python -m venv venv
