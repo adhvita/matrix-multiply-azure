@@ -23,9 +23,12 @@ jobs:
       - name: Vendor dependencies into .python_packages
         shell: bash
         run: |
+          rm -rf .python_packages
+          mkdir -p .python_packages/lib/site-packages
           python -m pip install --upgrade pip
           pip install --no-cache-dir -r requirements.txt --target ".python_packages/lib/site-packages"
-          python - <<'PY' import os, numpy as np print("VENDORED_NUMPY", np.__version__) print("HAS_NUMPY_FILE", os.path.exists(".python_packages/lib/site-packages/numpy/__init__.py")) PY
+          python -c "import os, numpy as np; print('VENDORED_NUMPY', np.__version__); print('HAS_NUMPY_FILE', os.path.exists('.python_packages/lib/site-packages/numpy/__init__.py'))"
+
 
       - name: Sanity list
         shell: bash
