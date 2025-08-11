@@ -27,6 +27,8 @@ jobs:
           mkdir -p .python_packages/lib/site-packages
           python -m pip install --upgrade pip
           pip install --no-cache-dir -r requirements.txt --target ".python_packages/lib/site-packages"
+          export PYTHONPATH="$PWD/.python_packages/lib/site-packages:$PYTHONPATH"
+          python -c "import os, sys; print('PYTHONPATH_OK', os.path.exists('.python_packages/lib/site-packages'))"
           python -c "import os, numpy as np; print('VENDORED_NUMPY', np.__version__); print('HAS_NUMPY_FILE', os.path.exists('.python_packages/lib/site-packages/numpy/__init__.py'))"
 
 
