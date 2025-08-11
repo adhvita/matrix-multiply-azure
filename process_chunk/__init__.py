@@ -1,6 +1,12 @@
 import os, io, json, time, logging
 import azure.functions as func
-from azure.storage.blob import BlobServiceClient, ContentSettings, BlobRequestConditions
+from azure.storage.blob import BlobServiceClient, ContentSettings
+try:
+    # Newer SDKs
+    from azure.storage.blob import BlobRequestConditions       # type: ignore
+    _HAVE_COND = True
+except Exception:
+    _HAVE_COND = False
 from azure.core.exceptions import ResourceExistsError
 import ijson, numpy as np
 
@@ -48,15 +54,21 @@ def _get_append_client(conn, full_path:str):
     return bc
 
 def _append_line(bc, line:str):
-    data=(line if line.endswith("\n") else line+"\n").encode("utf-8")
-    # idempotent append: only append if position hasn't changed
-    props = bc.get_blob_properties()
-    pos = props.size
-    cond = BlobRequestConditions(); cond.if_append_position_equal = pos
-    try:
-        bc.append_block(data, conditions=cond)
-    except Exception as e:
-        logging.warning("Skip duplicate append (position changed): %s", e)
+    data = (line if line.endswith("\n") else line + "\n").encode("utf-8")
+
+    if _HAVE_COND:
+        # Idempotent append when the type is available
+        props = bc.get_blob_properties()
+        pos = props.size
+        cond = BlobRequestConditions()
+        cond.if_append_position_equal = pos
+        try:
+            bc.append_block(data, conditions=cond)
+        except Exception as e:
+            logging.warning("Skip duplicate append (position changed): %s", e)
+    else:
+        # Older SDK: just append (may duplicate on retries)
+        bc.append_block(data)
 
 def main(msg: func.QueueMessage, queueOut: func.Out[str]):
     t0=time.time()
