@@ -1,112 +1,80 @@
-# Docs for the Azure Web Apps Deploy action: https://github.com/azure/functions-action
-# More GitHub Actions for Azure: https://github.com/Azure/actions
-# More info on Python, GitHub Actions, and Azure Functions: https://aka.ms/python-webapps-actions
-
 name: Build and deploy Python project to Azure Function App - matrixmultiplication
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   workflow_dispatch:
 
 env:
-  AZURE_FUNCTIONAPP_PACKAGE_PATH: '.' # set this to the path to your web app project, defaults to the repository root
-  PYTHON_VERSION: '3.10' # set this to the python version to use (supports 3.6, 3.7, 3.8)
+  PYTHON_VERSION: "3.10"
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read #This is required for actions/checkout
-
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python version
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-        # Install dependencies
-      - name: Install dependencies
+      - name: Vendor dependencies into .python_packages
+        shell: bash
         run: |
-            python -m pip install --upgrade pip
-            pip install -r requirements.txt
-    
-      # Verify numpy installed (optional safety check)
-      - name: Verify numpy installation
-        run: python -c "import numpy; print('✅ numpy version:', numpy.__version__)"
-    
+          python -m pip install --upgrade pip
+          pip install --no-cache-dir -r requirements.txt --target ".python_packages/lib/site-packages"
+          python - <<'PY' import os, numpy as np print("VENDORED_NUMPY", np.__version__) print("HAS_NUMPY_FILE", os.path.exists(".python_packages/lib/site-packages/numpy/__init__.py")) PY
 
-      - name: Create and start virtual environment
+      - name: Sanity list
+        shell: bash
         run: |
-          python -m venv venv
-          source venv/bin/activate
+          echo "== function.json files =="
+          find . -maxdepth 3 -name function.json -print
+          echo "== site-packages head =="
+          ls -la .python_packages/lib/site-packages | head -n 50 || true
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Prepare deploy folder
+        shell: bash
+        run: |
+          rm -rf app
+          mkdir app
+          shopt -s dotglob
+          cp -r * app/
+          rm -rf app/venv app/.git app/.github
 
-      # Optional: Add step to run tests here
+      - name: Archive app
+        shell: bash
+        run: zip -qr app.zip app
 
-      - name: Zip artifact for deployment
-        run: zip release.zip ./* -r
-
-      - name: Upload artifact for deployment job
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: python-app
-          path: |
-            release.zip
-            !venv/
+          name: functionapp
+          path: app.zip
 
   deploy:
     runs-on: ubuntu-latest
     needs: build
-    
     steps:
-      - name: Download artifact from build job
+      - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: python-app
+          name: functionapp
 
       - name: Unzip artifact for deployment
-        run: unzip release.zip 
-        
-      - name: List functions to be deployed
+        shell: bash
         run: |
-          echo "== root =="
-          ls -la
-          echo "== function.json files =="
-          find . -maxdepth 3 -name function.json -print
-          echo "== host.json & requirements.txt =="
-          ls -la host.json requirements.txt
-          - name: Vendor Python deps
-          run: |
-            python -m pip install --upgrade pip
-            pip install --no-cache-dir -r requirements.txt \
-              --target ".python_packages/lib/site-packages"
-            python -c "import numpy; print('numpy in runner:', __import__('numpy').__version__)"
-        
-        # (Optional) List what will be deployed
-      - name: List payload
-        run: |
-            echo "function.json files:" && find . -maxdepth 3 -name function.json
-            echo "numpy vendor path:" && python - <<'PY'
-            import os, sys, glob
-            matches = glob.glob(".python_packages/lib/site-packages/numpy/__init__.py")
-            print(matches or "NOT FOUND")
-            PY
-        
-      - name: 'Deploy to Azure Functions'
+          unzip -q app.zip -d .
+          echo "== root of app =="
+          ls -la app | head -n 100
+          echo "== has .python_packages =="
+          ls -la app/.python_packages/lib/site-packages | head -n 50 || true
+
+      - name: Deploy to Azure Functions
         uses: Azure/functions-action@v1
-        id: deploy-to-function
         with:
-          app-name: 'matrixmultiplication'
-          slot-name: 'Production'
-          package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
+          app-name: matrixmultiplication
+          package: "app"
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_FA63582491A245C28606470E7AC07179 }}
-
-
-          
