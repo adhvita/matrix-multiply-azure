@@ -18,13 +18,18 @@ DEFAULT_CHUNK = 200  # pairs per run — tune later
 
 def main(triggerblob: func.InputStream, outQueueItem: func.Out[str]):
     parts = triggerblob.name.split("/", 1)
-    blob_name = parts[1] if len(parts) == 2 else triggerblob.name  # e.g. "folder/file.json"
+    blob_name = parts[1] if len(parts) == 2 else triggerblob.name 
     msg = {
         "blob": f"input-container/{blob_name}",
         "start_index": 0,
         "chunk_size": DEFAULT_CHUNK
     }
-    outQueueItem.set(json.dumps(msg))
+    outQueueItem.set(json.dumps({
+        "blob": f"input-container/{blob_name}",
+        "start_index": 0,
+        "chunk_size": DEFAULT_CHUNK,
+        "out_blob": out_blob
+    }))
 
 
 # # Tunables
