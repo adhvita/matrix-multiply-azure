@@ -12,11 +12,21 @@ import numpy as np
 
 from .strassen_module import strassen
 
-# ---- tunables -------------------------------------------------
-MAX_BYTES_FOR_INMEM = 200 * 1024 * 1024  # if result C bigger than this, summarize
+import os, io, json, logging
+from datetime import datetime, timezone
+from typing import Dict, Any, Iterable, Tuple
+
+import azure.functions as func
+from azure.storage.blob import BlobServiceClient
+import ijson
+import numpy as np
+
+from .strassen_module import strassen
+
+# Tunables
+MAX_BYTES_FOR_INMEM = 200 * 1024 * 1024
 PREVIEW_SIZE = 8
 BLOCK = 512
-# ---------------------------------------------------------------
 
 def blocked_matmul(A: np.ndarray, B: np.ndarray, block: int = BLOCK) -> np.ndarray:
     n = A.shape[0]
@@ -36,10 +46,9 @@ def safe_multiply(A: np.ndarray, B: np.ndarray) -> Tuple[np.ndarray, bool]:
     bytes_c = n * n * A.dtype.itemsize
     if bytes_c <= MAX_BYTES_FOR_INMEM:
         try:
-            C = strassen(A, B) if n >= 256 else (A @ B)
+            return (strassen(A, B) if n >= 256 else A @ B), True
         except Exception:
-            C = A @ B
-        return C, True
+            return A @ B, True
     else:
         return blocked_matmul(A, B, block=BLOCK), False
 
@@ -53,73 +62,66 @@ def summarize_matrix(C: np.ndarray, preview: int = PREVIEW_SIZE) -> Dict[str, An
         "mean": float(np.mean(C)),
     }
 
-# ---- helper: turn chunk iterator into a readable stream --------
-class IterStream(io.RawIOBase):
-    def __init__(self, iterator):
-        self._it = iter(iterator)
-        self._buf = b""
-    def readable(self): return True
-    def readinto(self, b):
-        if not self._buf:
-            try:
-                self._buf = next(self._it)
-            except StopIteration:
-                return 0
-        n = min(len(b), len(self._buf))
-        b[:n] = self._buf[:n]
-        self._buf = self._buf[n:]
-        return n
-# ---------------------------------------------------------------
-
-def iter_pairs(buffered: io.BufferedReader) -> Iterable[Dict[str, Any]]:
-    # JSON file is expected to be a top-level array: [ { "A":..., "B":... }, ... ]
-    for pair in ijson.items(buffered, "item"):
+def iter_pairs(txt_stream: io.TextIOBase) -> Iterable[Dict[str, Any]]:
+    # Top-level array:  [ {"A":...,"B":...}, ... ]
+    for pair in ijson.items(txt_stream, "item"):
         yield pair
 
 def main(triggerblob: func.InputStream, outputblob: func.Out[str]) -> None:
     try:
-        # Only use triggerblob for the name; do NOT read it (host may buffer).
-        blob_name = triggerblob.name.split("/", 1)[-1]  # "<path in container>"
-        logging.info("Triggered on: %s (length=%s)", triggerblob.name, getattr(triggerblob, "length", "n/a"))
+        # Example trigger name: "input-container/some/folder/big.json"
+        # We only need the part after the container name for the BlobClient.
+        name_with_container = triggerblob.name  # e.g. "input-container/foo.json"
+        parts = name_with_container.split("/", 1)
+        if len(parts) != 2:
+            raise ValueError(f"Unexpected trigger name: {name_with_container}")
+        blob_name = parts[1]  # e.g. "foo.json"
 
-        # Stream from Storage directly (no buffering)
+        logging.info("Triggered on: %s (host length hint=%s)", name_with_container, getattr(triggerblob, "length", "n/a"))
+
+        # Manual streaming from Storage (no host buffering)
         conn_str = os.environ["AzureWebJobsStorage"]
-        input_container = "input-container"   # <-- match function.json path
+        input_container = "input-container"   # must match function.json
         bsc = BlobServiceClient.from_connection_string(conn_str)
         bc = bsc.get_blob_client(container=input_container, blob=blob_name)
 
-        # chunks() yields small byte chunks; wrap into a file-like stream
-        raw = IterStream(bc.download_blob().chunks())
-        buffered = io.BufferedReader(raw)
+        downloader = bc.download_blob(max_concurrency=1)
+        # Convert chunk iterator -> buffered binary -> text (UTF-8) for ijson
+        raw_iter = downloader.chunks()
+        raw_stream = io.BufferedReader(io.BytesIO(b""))  # placeholder to set type
+        # Use a small wrapper so we can feed chunks to a RawIOBase-compatible object
+        class IterStream(io.RawIOBase):
+            def __init__(self, it): self.it, self.buf = iter(it), b""
+            def readable(self): return True
+            def readinto(self, b):
+                if not self.buf:
+                    try: self.buf = next(self.it)
+                    except StopIteration: return 0
+                n = min(len(b), len(self.buf))
+                b[:n] = self.buf[:n]; self.buf = self.buf[n:]
+                return n
+        raw_stream = io.BufferedReader(IterStream(raw_iter), buffer_size=8 * 1024 * 1024)
+        text_stream = io.TextIOWrapper(raw_stream, encoding="utf-8")
 
-        results = []
-        count = 0
-
-        for idx, pair in enumerate(iter_pairs(buffered)):
-            if "A" not in pair or "B" not in pair:
+        results, count = [], 0
+        for idx, pair in enumerate(iter_pairs(text_stream)):
+            A_list, B_list = pair.get("A"), pair.get("B")
+            if A_list is None or B_list is None:
                 results.append({"index": idx, "error": "Missing keys A or B"})
                 continue
 
-            A = np.array(pair["A"], dtype=np.float32)
-            B = np.array(pair["B"], dtype=np.float32)
-
+            A = np.array(A_list, dtype=np.float32)
+            B = np.array(B_list, dtype=np.float32)
             if A.ndim != 2 or B.ndim != 2 or A.shape != B.shape or A.shape[0] != A.shape[1]:
                 results.append({"index": idx, "error": f"Invalid shapes: {A.shape} vs {B.shape}"})
                 continue
 
             n = A.shape[0]
-            logging.info("Processing pair %d, shape %s", idx, A.shape)
+            logging.info("Processing pair %d, n=%d", idx, n)
+            C, full = safe_multiply(A, B)
 
-            C, return_full = safe_multiply(A, B)
-
-            if return_full and n <= PREVIEW_SIZE:
-                results.append({
-                    "index": idx,
-                    "shape": [int(n), int(n)],
-                    "A": A.tolist(),
-                    "B": B.tolist(),
-                    "C": C.tolist()
-                })
+            if full and n <= PREVIEW_SIZE:
+                results.append({"index": idx, "shape": [int(n), int(n)], "A": A.tolist(), "B": B.tolist(), "C": C.tolist()})
             else:
                 results.append({
                     "index": idx,
