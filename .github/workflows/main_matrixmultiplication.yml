@@ -27,29 +27,29 @@ jobs:
           mkdir -p .python_packages/lib/site-packages
           python -m pip install --upgrade pip
           pip install --no-cache-dir -r requirements.txt --target ".python_packages/lib/site-packages"
+          # make vendored deps visible to Python in CI (Azure adds this automatically)
           export PYTHONPATH="$PWD/.python_packages/lib/site-packages:$PYTHONPATH"
-          python -c "import os, sys; print('PYTHONPATH_OK', os.path.exists('.python_packages/lib/site-packages'))"
-          python -c "import os, numpy as np; print('VENDORED_NUMPY', np.__version__); print('HAS_NUMPY_FILE', os.path.exists('.python_packages/lib/site-packages/numpy/__init__.py'))"
-
+          python -c "import numpy as np; print('VENDORED_NUMPY', np.__version__)"
 
       - name: Sanity list
         shell: bash
         run: |
-          echo "== function.json files =="
-          find . -maxdepth 3 -name function.json -print
-          echo "== site-packages head =="
-          ls -la .python_packages/lib/site-packages | head -n 50 || true
+          echo "== function.json files =="; find . -maxdepth 3 -name function.json -print
+          echo "== site-packages head =="; ls -la .python_packages/lib/site-packages | head -n 50 || true
 
-      - name: Prepare deploy folder
+      - name: Prepare deploy folder (exclude .git/.github/venv/app)
         shell: bash
         run: |
           rm -rf app
           mkdir app
-          shopt -s dotglob
-          cp -r * app/
-          rm -rf app/venv app/.git app/.github
+          rsync -a ./ app/ \
+            --exclude "app" \
+            --exclude ".git" \
+            --exclude ".github" \
+            --exclude "venv" \
+            --exclude ".venv"
 
-      - name: Archive app
+      - name: Archive app (for artifact)
         shell: bash
         run: zip -qr app.zip app
 
@@ -72,10 +72,8 @@ jobs:
         shell: bash
         run: |
           unzip -q app.zip -d .
-          echo "== root of app =="
-          ls -la app | head -n 100
-          echo "== has .python_packages =="
-          ls -la app/.python_packages/lib/site-packages | head -n 50 || true
+          echo "== root of app =="; ls -la app | head -n 100
+          echo "== has .python_packages =="; ls -la app/.python_packages/lib/site-packages | head -n 50 || true
 
       - name: Deploy to Azure Functions
         uses: Azure/functions-action@v1
