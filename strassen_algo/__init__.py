@@ -1,11 +1,4 @@
-import logging
-import json
-import numpy as np
-import time
-import azure.functions as func
-from .strassen_module import strassen
-from datetime import datetime, timezone
-
+import os
 import io
 import json
 import logging
@@ -13,109 +6,100 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Iterable, Tuple
 
 import azure.functions as func
+from azure.storage.blob import BlobServiceClient
 import ijson
 import numpy as np
 
-# Your Strassen implementation
 from .strassen_module import strassen
 
-# --- Tunables ---------------------------------------------------------------
-
-# When n*n*elem_size exceeds this many bytes, avoid allocating full C in RAM.
-MAX_BYTES_FOR_INMEM = 200 * 1024 * 1024  # 200 MB
-
-# For big results, include only a small preview and checksums
-PREVIEW_SIZE = 8  # 8x8 preview
-
-# Block size for blocked multiply (keeps peak RAM low)
+# ---- tunables -------------------------------------------------
+MAX_BYTES_FOR_INMEM = 200 * 1024 * 1024  # if result C bigger than this, summarize
+PREVIEW_SIZE = 8
 BLOCK = 512
-
-# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------
 
 def blocked_matmul(A: np.ndarray, B: np.ndarray, block: int = BLOCK) -> np.ndarray:
-    """Memory-friendlier multiply than one big matmul; still returns full C."""
     n = A.shape[0]
     C = np.zeros((n, n), dtype=A.dtype)
     for i in range(0, n, block):
         i2 = min(i + block, n)
         for j in range(0, n, block):
             j2 = min(j + block, n)
-            # zero tile
             C[i:i2, j:j2] = 0
             for k in range(0, n, block):
                 k2 = min(k + block, n)
                 C[i:i2, j:j2] += A[i:i2, k:k2] @ B[k:k2, j:j2]
     return C
 
-
 def safe_multiply(A: np.ndarray, B: np.ndarray) -> Tuple[np.ndarray, bool]:
-    """
-    Multiply choosing algorithm based on size.
-    Returns (C, full_return) where full_return indicates whether we should serialize the full C.
-    """
-    assert A.shape == B.shape and A.shape[0] == A.shape[1]
     n = A.shape[0]
-    elem_size = A.dtype.itemsize
-    bytes_c = n * n * elem_size
-
-    # Use Strassen for smaller sizes, else blocked matmul.
+    bytes_c = n * n * A.dtype.itemsize
     if bytes_c <= MAX_BYTES_FOR_INMEM:
-        # Heuristic: Strassen typically helps for n >= 256–512; your impl decides.
         try:
-            if n >= 256:
-                C = strassen(A, B)
-            else:
-                C = A @ B
+            C = strassen(A, B) if n >= 256 else (A @ B)
         except Exception:
-            # Fallback if Strassen fails for any reason
             C = A @ B
         return C, True
     else:
-        # Too big to safely keep full C in memory; still compute but only return summaries.
-        C = blocked_matmul(A, B, block=BLOCK)
-        return C, False
-
+        return blocked_matmul(A, B, block=BLOCK), False
 
 def summarize_matrix(C: np.ndarray, preview: int = PREVIEW_SIZE) -> Dict[str, Any]:
-    """Return small preview and checksums to keep output light."""
-    n = C.shape[0]
-    p = min(preview, n)
-    preview_block = C[:p, :p].tolist()
+    n = C.shape[0]; p = min(preview, n)
     return {
         "shape": [int(n), int(n)],
         "dtype": str(C.dtype),
-        "preview_top_left": preview_block,
+        "preview_top_left": C[:p, :p].tolist(),
         "sum": float(np.sum(C)),
         "mean": float(np.mean(C)),
     }
 
+# ---- helper: turn chunk iterator into a readable stream --------
+class IterStream(io.RawIOBase):
+    def __init__(self, iterator):
+        self._it = iter(iterator)
+        self._buf = b""
+    def readable(self): return True
+    def readinto(self, b):
+        if not self._buf:
+            try:
+                self._buf = next(self._it)
+            except StopIteration:
+                return 0
+        n = min(len(b), len(self._buf))
+        b[:n] = self._buf[:n]
+        self._buf = self._buf[n:]
+        return n
+# ---------------------------------------------------------------
 
-def iter_pairs(buf: io.BufferedReader) -> Iterable[Dict[str, Any]]:
-    """
-    Stream the top-level JSON array:  [ {"A": ... , "B": ...}, {"A": ... , "B": ...}, ... ]
-    Each yielded item is one pair dict (ijson builds only that item into memory).
-    """
-    for pair in ijson.items(buf, "item"):
+def iter_pairs(buffered: io.BufferedReader) -> Iterable[Dict[str, Any]]:
+    # JSON file is expected to be a top-level array: [ { "A":..., "B":... }, ... ]
+    for pair in ijson.items(buffered, "item"):
         yield pair
 
-
-def main(inputblob: func.InputStream, outputblob: func.Out[str]) -> None:
+def main(triggerblob: func.InputStream, outputblob: func.Out[str]) -> None:
     try:
-        logging.info("Function triggered on: %s  size=%d bytes", inputblob.name, inputblob.length)
+        # Only use triggerblob for the name; do NOT read it (host may buffer).
+        blob_name = triggerblob.name.split("/", 1)[-1]  # "<path in container>"
+        logging.info("Triggered on: %s (length=%s)", triggerblob.name, getattr(triggerblob, "length", "n/a"))
 
-        # IMPORTANT: wrap the blob stream so ijson can incrementally parse it
-        buffered = io.BufferedReader(inputblob)
+        # Stream from Storage directly (no buffering)
+        conn_str = os.environ["AzureWebJobsStorage"]
+        input_container = "input-container"   # <-- match function.json path
+        bsc = BlobServiceClient.from_connection_string(conn_str)
+        bc = bsc.get_blob_client(container=input_container, blob=blob_name)
+
+        # chunks() yields small byte chunks; wrap into a file-like stream
+        raw = IterStream(bc.download_blob().chunks())
+        buffered = io.BufferedReader(raw)
 
         results = []
         count = 0
 
         for idx, pair in enumerate(iter_pairs(buffered)):
-            # Expecting each pair to have lists for A and B
             if "A" not in pair or "B" not in pair:
                 results.append({"index": idx, "error": "Missing keys A or B"})
                 continue
 
-            # Convert to float32 to halve memory vs float64 (tweak if you need integers)
             A = np.array(pair["A"], dtype=np.float32)
             B = np.array(pair["B"], dtype=np.float32)
 
@@ -124,44 +108,42 @@ def main(inputblob: func.InputStream, outputblob: func.Out[str]) -> None:
                 continue
 
             n = A.shape[0]
-            logging.info("Processing pair %d with shape %s", idx, A.shape)
+            logging.info("Processing pair %d, shape %s", idx, A.shape)
 
-            C, can_return_full = safe_multiply(A, B)
+            C, return_full = safe_multiply(A, B)
 
-            if can_return_full and n <= PREVIEW_SIZE:  # tiny matrices → include full C
+            if return_full and n <= PREVIEW_SIZE:
                 results.append({
                     "index": idx,
                     "shape": [int(n), int(n)],
-                    "A": pair["A"],
-                    "B": pair["B"],
-                    "C": C.astype(np.float32).tolist(),
+                    "A": A.tolist(),
+                    "B": B.tolist(),
+                    "C": C.tolist()
                 })
             else:
-                # keep response small
                 results.append({
                     "index": idx,
                     "shape": [int(n), int(n)],
                     "A_preview": (A[:PREVIEW_SIZE, :PREVIEW_SIZE].tolist() if n > PREVIEW_SIZE else A.tolist()),
                     "B_preview": (B[:PREVIEW_SIZE, :PREVIEW_SIZE].tolist() if n > PREVIEW_SIZE else B.tolist()),
-                    "C_summary": summarize_matrix(C, PREVIEW_SIZE),
+                    "C_summary": summarize_matrix(C, PREVIEW_SIZE)
                 })
 
-            # free per-iteration arrays promptly
             del A, B, C
             count += 1
 
-        output_data = {
+        payload = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "num_pairs": count,
-            "results": results,
+            "results": results
         }
+        outputblob.set(json.dumps(payload))
+        logging.info("✅ Completed %d pairs for %s", count, blob_name)
 
-        outputblob.set(json.dumps(output_data))
-        logging.info("✅ Completed %d pairs from %s", count, inputblob.name)
-
-    except Exception as e:
-        logging.exception("❌ Error processing streamed dataset")
+    except Exception:
+        logging.exception("❌ Error during streaming processing")
         raise
+
 
 # def main(inputblob: func.InputStream, outputblob: func.Out[str]):
 #     try:

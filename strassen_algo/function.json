@@ -2,7 +2,7 @@
   "scriptFile": "__init__.py",
   "bindings": [
     {
-      "name": "inputblob",
+      "name": "triggerblob",
       "type": "blobTrigger",
       "direction": "in",
       "path": "input-container/{name}.json",
