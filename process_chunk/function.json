@@ -1,0 +1,20 @@
+{
+    "bindings": [
+      {
+        "name": "msg",
+        "type": "queueTrigger",
+        "direction": "in",
+        "queueName": "matrix-tasks",
+        "connection": "AzureWebJobsStorage"
+      },
+      {
+        "name": "queueOut",
+        "type": "queue",
+        "direction": "out",
+        "queueName": "matrix-tasks",
+        "connection": "AzureWebJobsStorage"
+      }
+    ],
+    "scriptFile": "__init__.py"
+  }
+  

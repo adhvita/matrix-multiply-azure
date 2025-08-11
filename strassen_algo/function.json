@@ -1,19 +1,19 @@
 {
-  "scriptFile": "__init__.py",
   "bindings": [
     {
       "name": "triggerblob",
       "type": "blobTrigger",
       "direction": "in",
-      "path": "input-container/{name}.json",
+      "path": "input-container/{name}",
       "connection": "AzureWebJobsStorage"
     },
     {
-      "name": "outputblob",
-      "type": "blob",
-      "direction": "out",
-      "path": "output-container/result-{name}.json",
-      "connection": "AzureWebJobsStorage"
+      "type": "queue",
+      "name": "outQueueItem",
+      "queueName": "matrix-tasks",
+      "connection": "AzureWebJobsStorage",
+      "direction": "out"
     }
-  ]
+  ],
+  "scriptFile": "__init__.py"
 }

@@ -1,7 +1,7 @@
 {
     "version": "2.0",
     "extensionBundle": { "id": "Microsoft.Azure.Functions.ExtensionBundle", "version": "[4.*, 5.0.0)" },
-    "functionTimeout": "00:10:00",
+    "functionTimeout": "00:09:00",
     "extensions": { "blobs": { "maxDegreeOfParallelism": 1 } },
     "logging": { "applicationInsights": { "samplingSettings": { "isEnabled": false } } }
 }
