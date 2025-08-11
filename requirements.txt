@@ -1,3 +1,4 @@
 azure-functions
 numpy==1.26.4
 azure-storage-blob
+ijson==3.2.3
