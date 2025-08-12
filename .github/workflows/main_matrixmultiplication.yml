@@ -26,7 +26,7 @@ jobs:
           rm -rf .python_packages
           mkdir -p .python_packages/lib/site-packages
           python -m pip install --upgrade pip
-          pip install --no-cache-dir -r requirements.txt --target ".python_packages/lib/site-packages"
+          pip install --no-cache-dir --only-binary=:all: -r requirements.txt --target ".python_packages/lib/site-packages"
           # make vendored deps visible to Python in CI (Azure adds this automatically)
           export PYTHONPATH="$PWD/.python_packages/lib/site-packages:$PYTHONPATH"
           python -c "import numpy as np; print('VENDORED_NUMPY', np.__version__)"

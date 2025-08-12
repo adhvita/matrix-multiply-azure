@@ -17,20 +17,17 @@ import azure.functions as func
 DEFAULT_CHUNK = 200  # pairs per run — tune later
 
 def main(triggerblob: func.InputStream, outQueueItem: func.Out[str]):
-    parts = triggerblob.name.split("/", 1)
-    blob_name = parts[1] if len(parts) == 2 else triggerblob.name 
-    msg = {
-        "blob": f"input-container/{blob_name}",
-        "start_index": 0,
-        "chunk_size": DEFAULT_CHUNK
-    }
+    blob_full = triggerblob.name  
+    
+    _, in_name = blob_full.split("/", 1)
+    safe = in_name.replace("/", "_")
+    out_blob = f"output-container/result-{safe}.jsonl"
     outQueueItem.set(json.dumps({
-        "blob": f"input-container/{blob_name}",
+        "blob": blob_full,
         "start_index": 0,
         "chunk_size": DEFAULT_CHUNK,
         "out_blob": out_blob
     }))
-
 
 # # Tunables
 # MAX_BYTES_FOR_INMEM = 200 * 1024 * 1024
