@@ -80,4 +80,4 @@ jobs:
         with:
           app-name: matrixmultiplication
           package: "app"
-          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_FA63582491A245C28606470E7AC07179 }}
+          publish-profile: ${{ secrets.AZURE_MATRIX_PUBLISH_PROFILE }}

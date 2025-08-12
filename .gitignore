@@ -46,3 +46,4 @@ __azurite_db*__.json
 Dockerfile
 .dockerignore
 .DS_Store
+matrixmultiplication.PublishSettings
