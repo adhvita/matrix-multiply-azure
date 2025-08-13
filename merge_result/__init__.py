@@ -21,7 +21,7 @@ def _create_append(out_name):
         bc.create_append_blob(content_settings=ContentSettings(content_type="application/json"))
     except Exception:
         pass
-    return bc
+    return bc  
 
 def main(msg: func.QueueMessage, mergeOut: func.Out[str]):
     payload = json.loads(msg.get_body().decode())

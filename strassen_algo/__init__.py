@@ -15,7 +15,6 @@ import json
 import azure.functions as func
 import os, io, json, uuid, logging
 import azure.functions as func
-import ijson
 from azure.storage.blob import BlobServiceClient, ContentSettings
 
 LINES_PER_SHARD = 10_000
