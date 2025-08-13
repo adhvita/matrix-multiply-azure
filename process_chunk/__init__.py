@@ -4,7 +4,7 @@ import numpy as np
 from azure.storage.blob import BlobServiceClient, ContentSettings
 
 # import your existing Strassen
-from ..strassen_algo.strassen_module import strassen  # path adjusted to new folder name
+from ..strassen_algo.strassen_module import strassen  
 
 JSONL_PREVIEW = 8
 READ_BUF_MB   = 8
