@@ -1,18 +1,25 @@
 {
   "bindings": [
     {
-      "name": "triggerblob",
+      "name": "inBlob",
       "type": "blobTrigger",
       "direction": "in",
-      "path": "input-container/{name}.json",
+      "path": "input-container/{name}",
       "connection": "AzureWebJobsStorage"
     },
     {
+      "name": "queueOut",
       "type": "queue",
-      "name": "outQueueItem",
-      "queueName": "matrix-tasks",
-      "connection": "AzureWebJobsStorage",
-      "direction": "out"
+      "direction": "out",
+      "queueName": "matrix-shards",
+      "connection": "AzureWebJobsStorage"
+    },
+    {
+      "name": "mergeOut",
+      "type": "queue",
+      "direction": "out",
+      "queueName": "matrix-merge",
+      "connection": "AzureWebJobsStorage"
     }
   ],
   "scriptFile": "__init__.py"

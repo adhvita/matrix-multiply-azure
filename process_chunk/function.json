@@ -8,10 +8,10 @@
         "connection": "AzureWebJobsStorage"
       },
       {
-        "name": "queueOut",
+        "name": "doneOut",
         "type": "queue",
         "direction": "out",
-        "queueName": "matrix-tasks",
+        "queueName": "matrix-merge",
         "connection": "AzureWebJobsStorage"
       }
     ],

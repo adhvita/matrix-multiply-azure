@@ -13,21 +13,74 @@ import numpy as np
 from .strassen_module import strassen
 import json
 import azure.functions as func
+import os, io, json, uuid, logging
+import azure.functions as func
+import ijson
+from azure.storage.blob import BlobServiceClient, ContentSettings
 
-DEFAULT_CHUNK = 200  # pairs per run — tune later
+LINES_PER_SHARD = 10_000
+READ_BUF_MB     = 16
+TEMP_CONTAINER  = "temp"  
+def _bsc():
+    return BlobServiceClient.from_connection_string(os.environ["AzureWebJobsStorage"])
 
-def main(triggerblob: func.InputStream, outQueueItem: func.Out[str]):
-    blob_full = triggerblob.name  
-    
-    _, in_name = blob_full.split("/", 1)
-    safe = in_name.replace("/", "_")
-    out_blob = f"output-container/result-{safe}.jsonl"
-    outQueueItem.set(json.dumps({
-        "blob": blob_full,
-        "start_index": 0,
-        "chunk_size": DEFAULT_CHUNK,
-        "out_blob": out_blob
-    }))
+def _iter_text(bc):
+    # streamed text reader
+    chunks = bc.download_blob(max_concurrency=2).chunks()
+    class _Raw(io.RawIOBase):
+        def __init__(self, it): self.it, self.buf = iter(it), b""
+        def readable(self): return True
+        def readinto(self, b):
+            if not self.buf:
+                try: self.buf = next(self.it)
+                except StopIteration: return 0
+            n = min(len(b), len(self.buf))
+            b[:n] = self.buf[:n]
+            self.buf = self.buf[n:]
+            return n
+    return io.TextIOWrapper(io.BufferedReader(_Raw(chunks), READ_BUF_MB*1024*1024), encoding="utf-8")
+
+def main(inBlob: func.InputStream, queueOut: func.Out[str], mergeOut: func.Out[str]):
+    # derive run id from file name + nonce for uniqueness
+    base = os.path.splitext(os.path.basename(inBlob.name))[0]
+    run_id = f"{base}-{uuid.uuid4().hex[:8]}"
+
+    in_container, in_name = inBlob.name.split("/", 1)
+    bc_in = _bsc().get_blob_client(in_container, in_name)
+    txt = _iter_text(bc_in)
+
+    prefix = f"runs/{run_id}/shards"
+    shard_idx = 0
+    total = 0
+    lines = []
+
+    def flush():
+        nonlocal shard_idx, lines
+        if not lines: return
+        shard_idx += 1
+        shard_name = f"{prefix}/shard-{shard_idx:05d}.ndjson"
+        data = ("\n".join(lines) + "\n").encode("utf-8")
+        _bsc().get_blob_client(TEMP_CONTAINER, shard_name).upload_blob(
+            data, overwrite=True, content_settings=ContentSettings(content_type="application/x-ndjson")
+        )
+        queueOut.set(json.dumps({
+            "run_id": run_id,
+            "shard_no": shard_idx,
+            "shard_blob": f"{TEMP_CONTAINER}/{shard_name}"
+        }))
+        lines.clear()
+
+    # input is a big JSON array of pairs
+    for pair in ijson.items(txt, "item"):
+        lines.append(json.dumps(pair, separators=(",", ":")))
+        total += 1
+        if len(lines) >= LINES_PER_SHARD:
+            flush()
+    flush()
+
+    mergeOut.set(json.dumps({"run_id": run_id, "expected_parts": shard_idx}))
+    logging.info("Split complete: run=%s shards=%d total_pairs=%d", run_id, shard_idx, total)
+
 
 # # Tunables
 # MAX_BYTES_FOR_INMEM = 200 * 1024 * 1024
