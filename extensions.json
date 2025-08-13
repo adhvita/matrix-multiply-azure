@@ -1,0 +1,9 @@
+{
+    "extensions": [
+      {
+        "name": "Microsoft.Azure.WebJobs.Extensions.Storage.Queues",
+        "typeName": "Microsoft.Azure.WebJobs.Extensions.Storage.Queues.QueueTriggerAttribute, Microsoft.Azure.WebJobs.Extensions.Storage.Queues"
+      }
+    ]
+  }
+  
