@@ -13,13 +13,6 @@
       "direction": "out",
       "queueName": "matrix-shards",
       "connection": "AzureWebJobsStorage"
-    },
-    {
-      "name": "mergeOut",
-      "type": "queue",
-      "direction": "out",
-      "queueName": "matrix-merge",
-      "connection": "AzureWebJobsStorage"
     }
   ],
   "scriptFile": "__init__.py"
