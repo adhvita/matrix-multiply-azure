@@ -6,8 +6,12 @@
   },
   "extensions": {
     "queues": {
-      "batchSize": 8,
-      "newBatchThreshold": 2
+      "batchSize": 1,
+      "maxDequeueCount": 5,
+      "newBatchThreshold": 0
+    },
+    "blobs": {
+      "maxDegreeOfParallelism": 1
     }
   }
 }
