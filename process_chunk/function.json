@@ -8,7 +8,7 @@
         "connection": "AzureWebJobsStorage"
       },
       {
-        "name": "doneOut",
+        "name": "mergeOut",
         "type": "queue",
         "direction": "out",
         "queueName": "matrix-merge",
