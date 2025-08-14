@@ -108,8 +108,8 @@ def main(msg: func.QueueMessage, mergeOut: func.Out[str]):
         # Parse "temp/<path>" into (container, name)
         container, name = shard_blob.split("/", 1) if "/" in shard_blob else (TEMP_CONTAINER, shard_blob)
 
-        svc = _bsc()
-        bc_in = svc.get_blob_client(container, name)
+        service_client = _bsc()
+        bc_in = service_client.get_blob_client(container, name)
 
         # Stream NDJSON lines:
         downloader = bc_in.download_blob(max_concurrency=2)
@@ -118,7 +118,7 @@ def main(msg: func.QueueMessage, mergeOut: func.Out[str]):
         # Prepare parts output
         parts_prefix = f"runs/{run_id}/parts"
         part_name = f"{parts_prefix}/part-{shard_no:05d}.jsonl"
-        bc_out = svc.get_blob_client(TEMP_CONTAINER, part_name)
+        bc_out = service_client.get_blob_client(TEMP_CONTAINER, part_name)
 
         # Create/overwrite a small block blob for the part
         bc_out.upload_blob(b"", overwrite=True, content_settings=ContentSettings(content_type="application/x-ndjson"))
