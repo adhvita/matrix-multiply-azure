@@ -39,7 +39,7 @@ def _iter_text(bc):
             return n
     return io.TextIOWrapper(io.BufferedReader(_Raw(chunks), READ_BUF_MB*1024*1024), encoding="utf-8")
 
-def main(inBlob: func.InputStream, queueOut: func.Out[str], mergeOut: func.Out[str]):
+# def main(inBlob: func.InputStream, queueOut: func.Out[str], mergeOut: func.Out[str]):
     # derive run id from file name + nonce for uniqueness
     base = os.path.splitext(os.path.basename(inBlob.name))[0]
     run_id = f"{base}-{uuid.uuid4().hex[:8]}"
@@ -78,6 +78,75 @@ def main(inBlob: func.InputStream, queueOut: func.Out[str], mergeOut: func.Out[s
     flush()
 
     mergeOut.set(json.dumps({"run_id": run_id, "expected_parts": shard_idx}))
+    logging.info("Split complete: run=%s shards=%d total_pairs=%d", run_id, shard_idx, total)
+
+def main(inBlob: func.InputStream, queueOut: func.Out[str]):
+    """
+    Blob trigger: splits the big JSON array into shard NDJSON blobs under
+    temp/runs/<run_id>/shards/, and enqueues one queue message per shard.
+
+    Also writes temp/runs/<run_id>/manifest.json with expected_parts for later merge.
+    """
+    import os, uuid, json, logging
+    from datetime import datetime, timezone
+    from azure.storage.blob import ContentSettings
+
+    # derive run id from file name + nonce for uniqueness
+    base = os.path.splitext(os.path.basename(inBlob.name))[0]
+    run_id = f"{base}-{uuid.uuid4().hex[:8]}"
+
+    # stream input JSON from the original blob
+    in_container, in_name = inBlob.name.split("/", 1)
+    bc_in = _bsc().get_blob_client(in_container, in_name)
+    txt = _iter_text(bc_in)  # yields text stream (io.TextIOWrapper)
+
+    # where we write shards
+    prefix = f"runs/{run_id}/shards"
+    shard_idx = 0
+    total = 0
+    lines = []
+
+    def flush():
+        nonlocal shard_idx, lines
+        if not lines:
+            return
+        shard_idx += 1
+        shard_name = f"{prefix}/shard-{shard_idx:05d}.ndjson"
+        data = ("\n".join(lines) + "\n").encode("utf-8")
+        _bsc().get_blob_client(TEMP_CONTAINER, shard_name).upload_blob(
+            data,
+            overwrite=True,
+            content_settings=ContentSettings(content_type="application/x-ndjson"),
+        )
+        # enqueue a processing task for this shard
+        queueOut.set(json.dumps({
+            "run_id": run_id,
+            "shard_no": shard_idx,
+            # worker expects container + path; adjust only if your worker expects just the path
+            "shard_blob": f"{TEMP_CONTAINER}/{shard_name}"
+        }))
+        lines.clear()
+
+    # input is a big JSON array of pairs, streamed with ijson
+    for pair in ijson.items(txt, "item"):
+        lines.append(json.dumps(pair, separators=(",", ":")))
+        total += 1
+        if len(lines) >= LINES_PER_SHARD:
+            flush()
+    flush()  # flush any tail
+
+    # Write a tiny manifest for the run so the worker/merger knows how many parts to expect
+    manifest = {
+        "run_id": run_id,
+        "expected_parts": shard_idx,
+        "created_utc": datetime.now(timezone.utc).isoformat()
+    }
+    _bsc().get_blob_client(TEMP_CONTAINER, f"runs/{run_id}/manifest.json").upload_blob(
+        json.dumps(manifest).encode("utf-8"),
+        overwrite=True,
+        content_settings=ContentSettings(content_type="application/json"),
+    )
+
     logging.info("Split complete: run=%s shards=%d total_pairs=%d", run_id, shard_idx, total)
 
 
