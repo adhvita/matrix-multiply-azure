@@ -4,14 +4,20 @@
     "id": "Microsoft.Azure.Functions.ExtensionBundle",
     "version": "[3.*, 4.0.0)"
   },
+  "functionTimeout": "00:09:00",
   "extensions": {
     "queues": {
       "batchSize": 1,
+      "newBatchThreshold": 0,
       "maxDequeueCount": 5,
-      "newBatchThreshold": 0
+      "visibilityTimeout": "00:15:00"
     },
     "blobs": {
       "maxDegreeOfParallelism": 1
+    },
+    "durableTask": {
+      "maxConcurrentOrchestratorFunctions": 2,
+      "maxConcurrentActivityFunctions": 2
     }
   }
 }
