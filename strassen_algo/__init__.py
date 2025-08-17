@@ -6,11 +6,11 @@ from azure.storage.blob import BlobServiceClient, ContentSettings
 from azure.storage.queue import QueueClient
 
 # ------- Tunables -------
-DEFAULT_MAX_LINES   = int(os.getenv("SHARD_MAX_LINES", "400"))                 # rows per shard (pairs mode)
-DEFAULT_MAX_BYTES   = int(os.getenv("SHARD_MAX_BYTES", str(6 * 1024 * 1024)))  # ~6 MiB safety cap
+DEFAULT_MAX_LINES   = int(os.getenv("SHARD_MAX_LINES", "10"))                 # rows per shard (pairs mode)
+DEFAULT_MAX_BYTES   = int(os.getenv("SHARD_MAX_BYTES", str(3 * 1024 * 1024)))  # ~6 MiB safety cap
 DEFAULT_COST_BUDGET = float(os.getenv("SHARD_COST_BUDGET", "2.0e7"))           # rough work cap (pairs mode)
-DEFAULT_BLOCK       = int(os.getenv("TILE_BLOCK", "128"))                      # block size (tile mode)
-DEFAULT_TILES_PER_SHARD = int(os.getenv("TILES_PER_SHARD", "2"))               # (i,j) tiles per shard (tile mode)
+DEFAULT_BLOCK       = int(os.getenv("TILE_BLOCK", "96"))                      # block size (tile mode)
+DEFAULT_TILES_PER_SHARD = int(os.getenv("TILES_PER_SHARD", "1"))               # (i,j) tiles per shard (tile mode)
 
 READ_BUF_MB    = 16
 TEMP_CONTAINER = os.getenv("TEMP_CONTAINER", "temp")
