@@ -1,213 +1,294 @@
 import os, io, json, uuid, logging
 import azure.functions as func
-import ijson
+import numpy as np
 from datetime import datetime, timezone
 from azure.storage.blob import BlobServiceClient, ContentSettings
 from azure.storage.queue import QueueClient
 
 # ------- Tunables -------
-DEFAULT_MAX_LINES   = int(os.getenv("SHARD_MAX_LINES", "10"))                 # rows per shard (pairs mode)
-DEFAULT_MAX_BYTES   = int(os.getenv("SHARD_MAX_BYTES", str(3 * 1024 * 1024)))  # ~6 MiB safety cap
-DEFAULT_COST_BUDGET = float(os.getenv("SHARD_COST_BUDGET", "2.0e7"))           # rough work cap (pairs mode)
-DEFAULT_BLOCK       = int(os.getenv("TILE_BLOCK", "96"))                      # block size (tile mode)
-DEFAULT_TILES_PER_SHARD = int(os.getenv("TILES_PER_SHARD", "1"))               # (i,j) tiles per shard (tile mode)
+DEFAULT_MAX_LINES          = int(os.getenv("SHARD_MAX_LINES", "10"))                 # Only used in pairs mode fallback
+DEFAULT_MAX_BYTES          = int(os.getenv("SHARD_MAX_BYTES", str(3 * 1024 * 1024))) # ~3 MiB per shard file
+DEFAULT_COST_BUDGET        = float(os.getenv("SHARD_COST_BUDGET", "2.0e7"))          # Pairs mode fallback
+DEFAULT_BLOCK              = int(os.getenv("TILE_BLOCK", "96"))                      # tile size for A,B
+DEFAULT_TILES_PER_SHARD    = int(os.getenv("TILES_PER_SHARD", "1"))                  # (i,j) tiles per shard
+READ_BUF_MB                = 16
 
-READ_BUF_MB    = 16
 TEMP_CONTAINER = os.getenv("TEMP_CONTAINER", "temp")
 PROCESS_QUEUE  = os.getenv("PROCESS_QUEUE",  "process-queue")
 
-def _bsc():
+# ----------------- Clients -----------------
+def _bsc() -> BlobServiceClient:
     return BlobServiceClient.from_connection_string(os.environ["AzureWebJobsStorage"])
 
-def _qc():
+def _qc() -> QueueClient:
     qc = QueueClient.from_connection_string(os.environ["AzureWebJobsStorage"], PROCESS_QUEUE)
     qc.create_queue()
     return qc
 
-def _iter_text(bc):
-    """Stream a blob as text with bounded memory."""
-    chunks = bc.download_blob(max_concurrency=2).chunks()
-    class _Raw(io.RawIOBase):
-        def __init__(self, it): self.it, self.buf = iter(it), b""
-        def readable(self): return True
-        def readinto(self, b):
-            if not self.buf:
-                try: self.buf = next(self.it)
-                except StopIteration: return 0
-            n = min(len(b), len(self.buf))
-            b[:n] = self.buf[:n]
-            self.buf = self.buf[n:]
-            return n
-    return io.TextIOWrapper(
-        io.BufferedReader(_Raw(chunks), READ_BUF_MB * 1024 * 1024),
-        encoding="utf-8"
-    )
-
-def _now_iso():
+# ----------------- Utils -----------------
+def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-def estimate_cost(pair) -> float:
-    """Cheap ~n^2.807 proxy so we keep per-shard work bounded."""
-    try:
-        A = pair.get("A")
-        if isinstance(A, list) and A:
-            n = min(len(A), len(A[0]) if isinstance(A[0], list) and A[0] else len(A))
-        else:
-            n = 64
-        if n <= 0: n = 64
-    except Exception:
-        n = 64
-    return float(n ** 2.807)
-
-def _write_blob(path: str, data: bytes, content_type: str):
-    _bsc().get_blob_client(TEMP_CONTAINER, path).upload_blob(
-        data, overwrite=True,
-        content_settings=ContentSettings(content_type=content_type)
-    )
 
 def _send_shard_msg(qc: QueueClient, run_id: str, shard_no: int, shard_path: str):
     qc.send_message(json.dumps({
         "run_id": run_id,
         "shard_no": shard_no,
-        "shard_blob": f"{TEMP_CONTAINER}/{shard_path}"
+        "shard_blob": f"{TEMP_CONTAINER}/{shard_path}"  # e.g. temp/runs/<run_id>/shards/shard-00001.npz
     }))
 
-# ---------- TILE MODE ----------
-def _emit_tiles_from_single_object(obj: dict, run_id: str, block: int, tiles_per_shard: int) -> int:
-    """Emit shards from a single large A×B object."""
-    A, B = obj["A"], obj["B"]
-    m, n = len(A), len(A[0]) if A else 0
-    n2, p = len(B), len(B[0]) if B else 0
-    if n != n2:
-        raise ValueError(f"shape mismatch: A {m}x{n}, B {n2}x{p}")
+def _upload_bytes(container: str, name: str, data: bytes, content_type: str):
+    _bsc().get_blob_client(container, name).upload_blob(
+        data, overwrite=True,
+        content_settings=ContentSettings(content_type=content_type)
+    )
 
-    qc = _qc()
-    shard_idx = 0
-    lines, bytes_used, tiles_in_shard = [], 0, 0
-    prefix = f"runs/{run_id}/shards"
+# ----------------- Binary shard writer -----------------
+def _write_binary_shard(run_id: str, shard_idx: int, tasks: list) -> str:
+    """
+    tasks: list of dicts with keys:
+      i0,j0,k0,bi,bj,bk and Ablk (np.ndarray float32), Bblk (np.ndarray float32)
+    Produces a single .npz containing multiple tasks:
+      scalars/1D: N,i0,j0,k0,bi,bj,bk
+      per-task 2D arrays: A_000,B_000, A_001,B_001, ...
+    """
+    N = len(tasks)
+    i0 = np.fromiter((t["i0"] for t in tasks), count=N, dtype=np.int32)
+    j0 = np.fromiter((t["j0"] for t in tasks), count=N, dtype=np.int32)
+    k0 = np.fromiter((t["k0"] for t in tasks), count=N, dtype=np.int32)
+    bi = np.fromiter((t["bi"] for t in tasks), count=N, dtype=np.int32)
+    bj = np.fromiter((t["bj"] for t in tasks), count=N, dtype=np.int32)
+    bk = np.fromiter((t["bk"] for t in tasks), count=N, dtype=np.int32)
 
-    def flush():
-        nonlocal shard_idx, lines, bytes_used, tiles_in_shard
-        if not lines: return
-        shard_idx += 1
-        shard_name = f"{prefix}/shard-{shard_idx:05d}.ndjson"
-        payload = ("\n".join(lines) + "\n").encode("utf-8")
-        _write_blob(shard_name, payload, "application/x-ndjson")
-        _send_shard_msg(qc, run_id, shard_idx, shard_name)
-        logging.info("Shard %d written (tile mode): %d rows, %.2f MiB",
-                     shard_idx, len(lines), len(payload)/(1024*1024))
-        lines.clear(); bytes_used = 0; tiles_in_shard = 0
+    payload = {"N": np.array(N, dtype=np.int64), "i0": i0, "j0": j0, "k0": k0, "bi": bi, "bj": bj, "bk": bk}
+    for idx, t in enumerate(tasks):
+        payload[f"A_{idx:03d}"] = t["Ablk"].astype(np.float32, copy=False)
+        payload[f"B_{idx:03d}"] = t["Bblk"].astype(np.float32, copy=False)
 
-    for i0 in range(0, m, block):
-        bi = min(block, m - i0)
-        for j0 in range(0, p, block):
-            bj = min(block, p - j0)
-            if tiles_in_shard >= tiles_per_shard and lines:
-                flush()
-            for k0 in range(0, n, block):
-                bk = min(block, n - k0)
-                Ablk = [row[k0:k0+bk] for row in A[i0:i0+bi]]
-                Bblk = [row[j0:j0+bj] for row in B[k0:k0+bk]]
-                line = json.dumps({
-                    "run_id": run_id, "i0": i0, "j0": j0, "k0": k0,
-                    "bi": bi, "bj": bj, "bk": bk, "A": Ablk, "B": Bblk
-                }, separators=(",", ":"))
-                if bytes_used + len(line) + 1 > DEFAULT_MAX_BYTES:
-                    flush()
-                lines.append(line); bytes_used += len(line) + 1
-            tiles_in_shard += 1
-    flush()
-    return shard_idx, (m, n, p)
+    buf = io.BytesIO()
+    np.savez(buf, **payload)
+    buf.seek(0)
 
-# ---------- MAIN ----------
-def main(inBlob: func.InputStream, queueOut: func.Out[str]):  # queueOut unused (we use QueueClient)
+    shard_name = f"runs/{run_id}/shards/shard-{shard_idx:05d}.npz"
+    _upload_bytes(TEMP_CONTAINER, shard_name, buf.getvalue(), "application/octet-stream")
+    return shard_name
+
+# ----------------- Main -----------------
+def main(inBlob: func.InputStream, queueOut: func.Out[str]):  # queueOut not used; we enqueue via SDK
+    # Run id
     base = os.path.splitext(os.path.basename(inBlob.name))[0]
     run_id = f"{base}-{uuid.uuid4().hex[:8]}"
 
-    bc_in = _bsc().get_blob_client(*inBlob.name.split("/", 1))
-    raw = bc_in.download_blob(max_concurrency=2).readall().decode("utf-8")
-    raw_stripped = raw.lstrip()
+    # Input blob client & bytes
+    in_container, in_name = inBlob.name.split("/", 1)
+    bc_in = _bsc().get_blob_client(in_container, in_name)
+    name_lower = in_name.lower()
 
-    shard_idx, total_pairs, mode, shapes = 0, 0, None, None
+    shard_idx = 0
+    mode = None
+    total_pairs = 0
 
-    if raw_stripped.startswith("{"):
-        # ---- TILE MODE ----
-        obj = json.loads(raw)
-        block = int(obj.get("block", DEFAULT_BLOCK))
-        tiles_per_shard = int(obj.get("tiles_per_shard", DEFAULT_TILES_PER_SHARD))
-        shard_idx, (m, n, p) = _emit_tiles_from_single_object(obj, run_id, block, tiles_per_shard)
-        mode, shapes = "tile", (m, n, p)
-        total_pairs = ((m + block - 1)//block) * ((p + block - 1)//block)
+    # ---- Case 1: NPZ input (preferred) ----
+    if name_lower.endswith(".npz"):
+        data = bc_in.download_blob(max_concurrency=2).readall()
+        with np.load(io.BytesIO(data), allow_pickle=False) as z:
+            if "A" not in z or "B" not in z:
+                raise ValueError("Input .npz must contain arrays 'A' and 'B'")
+            A = z["A"]; B = z["B"]
+            block = int(z["block"]) if "block" in z else DEFAULT_BLOCK
+            tiles_per_shard = int(z["tiles_per_shard"]) if "tiles_per_shard" in z else DEFAULT_TILES_PER_SHARD
 
+        # Validate/cast
+        if A.ndim != 2 or B.ndim != 2:
+            raise ValueError(f"A and B must be 2D; got A.ndim={A.ndim}, B.ndim={B.ndim}")
+        if A.shape[1] != B.shape[0]:
+            raise ValueError(f"shape mismatch: A {A.shape}, B {B.shape}")
+        if A.dtype != np.float32: A = A.astype(np.float32, copy=False)
+        if B.dtype != np.float32: B = B.astype(np.float32, copy=False)
+
+        m, n = A.shape
+        _, p = B.shape
+        mode = "tile-binary-input"
+
+        qc = _qc()
+        tasks, tiles_in_shard, shard_bytes = [], 0, 0
+
+        def flush():
+            nonlocal shard_idx, tasks, tiles_in_shard, shard_bytes
+            if not tasks: return
+            shard_idx += 1
+            shard_blob = _write_binary_shard(run_id, shard_idx, tasks)
+            _send_shard_msg(qc, run_id, shard_idx, shard_blob)
+            logging.info("Shard %d written (.npz): tasks=%d", shard_idx, len(tasks))
+            tasks.clear(); tiles_in_shard = 0; shard_bytes = 0
+
+        # Tile & pack multiple tasks per shard
+        for i0 in range(0, m, block):
+            bi = min(block, m - i0)
+            for j0 in range(0, p, block):
+                bj = min(block, p - j0)
+                if tiles_in_shard >= tiles_per_shard and tasks:
+                    flush()
+                for k0 in range(0, n, block):
+                    bk = min(block, n - k0)
+                    Ablk = A[i0:i0+bi, k0:k0+bk]
+                    Bblk = B[k0:k0+bk, j0:j0+bj]
+                    tasks.append({"i0": int(i0), "j0": int(j0), "k0": int(k0),
+                                  "bi": int(bi), "bj": int(bj), "bk": int(bk),
+                                  "Ablk": Ablk, "Bblk": Bblk})
+                tiles_in_shard += 1
+        flush()
+
+        # Meta for merger
         meta = {
             "run_id": run_id,
             "shapeA": [int(m), int(n)],
             "shapeB": [int(n), int(p)],
-            "block": block,
-            "num_shards": shard_idx,
+            "block": int(block),
+            "tiles_per_shard": int(tiles_per_shard),
+            "num_shards": int(shard_idx),
             "created_utc": _now_iso(),
             "mode": mode
         }
-        _write_blob(f"runs/{run_id}/meta.json", json.dumps(meta, indent=2).encode(), "application/json")
+        _upload_bytes(TEMP_CONTAINER, f"runs/{run_id}/meta.json",
+                      json.dumps(meta, indent=2).encode("utf-8"), "application/json")
 
-    elif raw_stripped.startswith("["):
-        # ---- ARRAY-OF-PAIRS MODE ----
-        mode = "pairs"
-        qc = _qc()
-        prefix = f"runs/{run_id}/shards"
-        buf_lines, buf_bytes, cost_used = [], 0, 0.0
-
-        def flush():
-            nonlocal shard_idx, buf_lines, buf_bytes, cost_used
-            if not buf_lines: return
-            shard_idx += 1
-            shard_name = f"{prefix}/shard-{shard_idx:05d}.ndjson"
-            data = ("\n".join(buf_lines) + "\n").encode("utf-8")
-            _write_blob(shard_name, data, "application/x-ndjson")
-            _send_shard_msg(qc, run_id, shard_idx, shard_name)
-            logging.info("Shard %d written: %d rows, %.2f MiB",
-                         shard_idx, len(buf_lines), len(data)/(1024*1024))
-            buf_lines.clear(); buf_bytes = 0; cost_used = 0.0
-
-        txt_iter = _iter_text(bc_in)
-        for pair in ijson.items(txt_iter, "item"):
-            line = json.dumps(pair, separators=(",", ":"))
-            size = len(line) + 1
-            cst = estimate_cost(pair)
-            if buf_lines and (len(buf_lines)+1 > DEFAULT_MAX_LINES or
-                              buf_bytes+size > DEFAULT_MAX_BYTES or
-                              cost_used+cst > DEFAULT_COST_BUDGET):
-                flush()
-            buf_lines.append(line)
-            buf_bytes += size
-            cost_used += cst
-            total_pairs += 1
-            if len(buf_lines) >= DEFAULT_MAX_LINES or buf_bytes >= DEFAULT_MAX_BYTES or cost_used >= DEFAULT_COST_BUDGET:
-                flush()
-        flush()
-
-        meta = {
+        # (Optional) manifest for visibility
+        manifest = {
             "run_id": run_id,
-            "num_shards": shard_idx,
+            "expected_parts": int(shard_idx),
             "created_utc": _now_iso(),
             "mode": mode
         }
-        _write_blob(f"runs/{run_id}/meta.json", json.dumps(meta, indent=2).encode(), "application/json")
+        _upload_bytes(TEMP_CONTAINER, f"runs/{run_id}/manifest.json",
+                      json.dumps(manifest, indent=2).encode("utf-8"), "application/json")
 
     else:
-        raise ValueError("Input must be a JSON object ({A,B}) or an array of {A,B} pairs")
+        # ---- Case 2: JSON fallback (still emits .npz shards) ----
+        raw = bc_in.download_blob(max_concurrency=2).readall().decode("utf-8")
+        raw_stripped = raw.lstrip()
 
-    manifest = {
-        "run_id": run_id,
-        "expected_parts": shard_idx,
-        "created_utc": _now_iso(),
-        "max_lines": DEFAULT_MAX_LINES,
-        "max_bytes": DEFAULT_MAX_BYTES,
-        "cost_budget": DEFAULT_COST_BUDGET,
-        "total_pairs": total_pairs,
-        "mode": mode
-    }
-    _write_blob(f"runs/{run_id}/manifest.json", json.dumps(manifest, indent=2).encode(), "application/json")
+        if raw_stripped.startswith("{"):
+            # single {A,B} object -> tile into .npz shards
+            obj = json.loads(raw)
+            A = np.array(obj["A"], dtype=np.float32)
+            B = np.array(obj["B"], dtype=np.float32)
+            block = int(obj.get("block", DEFAULT_BLOCK))
+            tiles_per_shard = int(obj.get("tiles_per_shard", DEFAULT_TILES_PER_SHARD))
 
-    logging.info("Split complete: run=%s mode=%s shards=%d total_pairs=%d",
-                 run_id, mode, shard_idx, total_pairs)
+            if A.shape[1] != B.shape[0]:
+                raise ValueError(f"shape mismatch: A {A.shape}, B {B.shape}")
+
+            m, n = A.shape
+            _, p = B.shape
+            mode = "tile-json-input"
+
+            qc = _qc()
+            tasks, tiles_in_shard = [], 0
+
+            def flush_json():
+                nonlocal shard_idx, tasks, tiles_in_shard
+                if not tasks: return
+                shard_idx += 1
+                shard_blob = _write_binary_shard(run_id, shard_idx, tasks)
+                _send_shard_msg(qc, run_id, shard_idx, shard_blob)
+                logging.info("Shard %d written (.npz from JSON): tasks=%d", shard_idx, len(tasks))
+                tasks.clear(); tiles_in_shard = 0
+
+            for i0 in range(0, m, block):
+                bi = min(block, m - i0)
+                for j0 in range(0, p, block):
+                    bj = min(block, p - j0)
+                    if tiles_in_shard >= tiles_per_shard and tasks:
+                        flush_json()
+                    for k0 in range(0, n, block):
+                        bk = min(block, n - k0)
+                        Ablk = A[i0:i0+bi, k0:k0+bk]
+                        Bblk = B[k0:k0+bk, j0:j0+bj]
+                        tasks.append({"i0": int(i0), "j0": int(j0), "k0": int(k0),
+                                      "bi": int(bi), "bj": int(bj), "bk": int(bk),
+                                      "Ablk": Ablk, "Bblk": Bblk})
+                    tiles_in_shard += 1
+            flush_json()
+
+            meta = {
+                "run_id": run_id,
+                "shapeA": [int(m), int(n)],
+                "shapeB": [int(n), int(p)],
+                "block": int(block),
+                "tiles_per_shard": int(tiles_per_shard),
+                "num_shards": int(shard_idx),
+                "created_utc": _now_iso(),
+                "mode": mode
+            }
+            _upload_bytes(TEMP_CONTAINER, f"runs/{run_id}/meta.json",
+                          json.dumps(meta, indent=2).encode("utf-8"), "application/json")
+
+            manifest = {
+                "run_id": run_id,
+                "expected_parts": int(shard_idx),
+                "created_utc": _now_iso(),
+                "mode": mode
+            }
+            _upload_bytes(TEMP_CONTAINER, f"runs/{run_id}/manifest.json",
+                          json.dumps(manifest, indent=2).encode("utf-8"), "application/json")
+
+        elif raw_stripped.startswith("["):
+            # array-of-pairs mode -> group pairs into .npz shards (no tiling)
+            mode = "pairs-json-input"
+            pairs = json.loads(raw)
+            qc = _qc()
+            tasks, shard_bytes = [], 0
+
+            def flush_pairs():
+                nonlocal shard_idx, tasks, shard_bytes
+                if not tasks: return
+                shard_idx += 1
+                shard_blob = _write_binary_shard(run_id, shard_idx, tasks)
+                _send_shard_msg(qc, run_id, shard_idx, shard_blob)
+                logging.info("Shard %d written (.npz pairs): tasks=%d", shard_idx, len(tasks))
+                tasks.clear(); shard_bytes = 0
+
+            for pair in pairs:
+                A = np.array(pair["A"], dtype=np.float32)
+                B = np.array(pair["B"], dtype=np.float32)
+                if A.shape[1] != B.shape[0]:
+                    raise ValueError(f"shape mismatch in pair: A {A.shape}, B {B.shape}")
+                # Pack entire pair as one task (use i0=j0=k0=0 for clarity)
+                tasks.append({
+                    "i0": 0, "j0": 0, "k0": 0,
+                    "bi": int(A.shape[0]), "bj": int(B.shape[1]), "bk": int(A.shape[1]),
+                    "Ablk": A, "Bblk": B
+                })
+                total_pairs += 1
+
+                # Rough byte estimate per pair shard; flush if large
+                approx = A.size * 4 + B.size * 4 + 6 * 4 + 64
+                if shard_bytes + approx > DEFAULT_MAX_BYTES:
+                    flush_pairs()
+                else:
+                    shard_bytes += approx
+            flush_pairs()
+
+            meta = {
+                "run_id": run_id,
+                "num_shards": int(shard_idx),
+                "created_utc": _now_iso(),
+                "mode": mode
+            }
+            _upload_bytes(TEMP_CONTAINER, f"runs/{run_id}/meta.json",
+                          json.dumps(meta, indent=2).encode("utf-8"), "application/json")
+
+            manifest = {
+                "run_id": run_id,
+                "expected_parts": int(shard_idx),
+                "created_utc": _now_iso(),
+                "total_pairs": int(total_pairs),
+                "mode": mode
+            }
+            _upload_bytes(TEMP_CONTAINER, f"runs/{run_id}/manifest.json",
+                          json.dumps(manifest, indent=2).encode("utf-8"), "application/json")
+
+        else:
+            raise ValueError("Input must be .npz, a JSON object ({A,B}) or a JSON array of {A,B} pairs")
+
+    logging.info("Split complete: run=%s mode=%s shards=%d", run_id, mode, shard_idx)
