@@ -11,7 +11,7 @@ import azure.functions as func
 import numpy as np
 from azure.storage.blob import BlobServiceClient, ContentSettings
 from azure.storage.queue import QueueClient
-from azure.core.exceptions import ResourceNotFoundError
+from azure.core.exceptions import ResourceNotFoundError, ResourceExistsError
 
 # import your algorithm (path is correct per your project)
 from ..strassen_algo.strassen_module import strassen
