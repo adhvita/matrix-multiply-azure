@@ -230,10 +230,14 @@
 #         logging.exception("process_chunk failed")
 #         raise
 
-import json, base64, logging
+import os, io, json, base64, logging
 import azure.functions as func
+import numpy as np
+from azure.storage.blob import BlobServiceClient
 
-def _parse(msg: func.QueueMessage):
+TEMP_CONTAINER = os.getenv("TEMP_CONTAINER", "temp")
+
+def _parse(msg: func.QueueMessage) -> dict:
     raw = msg.get_body()
     try:
         return json.loads(raw.decode("utf-8"))
@@ -241,9 +245,31 @@ def _parse(msg: func.QueueMessage):
         return json.loads(base64.b64decode(raw).decode("utf-8"))
 
 def main(msg: func.QueueMessage, mergeOut: func.Out[str]) -> None:
-    # If you see this in App Insights, the function started correctly
-    logging.info("process_chunk: MINIMAL handler running")
     payload = _parse(msg)
-    logging.info("process_chunk: got payload keys=%s", list(payload.keys()))
-    # acknowledge by exiting without raising; also ping merger so pipeline continues
-    mergeOut.set(json.dumps({"run_id": payload.get("run_id", "n/a")}))  # harmless
+    run_id    = payload["run_id"]
+    shard_no  = int(payload["shard_no"])
+    shard_blob= payload["shard_blob"]   # e.g., "temp/runs/<run_id>/shards/shard-00001.npz"
+
+    logging.info("B: payload ok run=%s shard=%d shard_blob=%s", run_id, shard_no, shard_blob)
+
+    if "/" in shard_blob:  # container + path
+        container, name = shard_blob.split("/", 1)
+    else:                  # fallback: assume container is TEMP_CONTAINER
+        container, name = TEMP_CONTAINER, shard_blob
+
+    bsc = BlobServiceClient.from_connection_string(os.environ["AzureWebJobsStorage"])
+    logging.info("B: using storage account=%s", bsc.account_name)
+
+    bc_in = bsc.get_blob_client(container, name)
+    exists = bc_in.exists()
+    logging.info("B: exists(%s/%s)=%s", container, name, exists)
+    if not exists:
+        raise RuntimeError("Shard blob missing")
+
+    data = bc_in.download_blob(max_concurrency=2).readall()
+    with np.load(io.BytesIO(data), allow_pickle=False) as z:
+        logging.info("B: npz keys=%s", list(z.files))
+        # no output yet; just proving this works
+
+    # Ack the message (no .done yet); merger will keep waiting
+    mergeOut.set(json.dumps({"run_id": run_id}))
