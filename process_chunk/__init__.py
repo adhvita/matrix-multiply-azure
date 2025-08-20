@@ -4,7 +4,7 @@ import json
 import time
 import logging
 from datetime import datetime, timezone
-
+import json, base64, logging
 import azure.functions as func
 import numpy as np
 from azure.storage.blob import BlobServiceClient, ContentSettings
@@ -96,8 +96,19 @@ def _write_part_npz(bsc: BlobServiceClient, run_id: str, shard_no: int, tiles: d
 
 # ---- Function entrypoint ----
 def main(msg: func.QueueMessage, mergeOut: func.Out[str]) -> None:
+    raw = msg.get_body()
     try:
-        payload = json.loads(msg.get_body().decode("utf-8"))
+        # payload = json.loads(msg.get_body().decode("utf-8"))
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except Exception:
+        # try base64 -> JSON
+            try:
+                payload = json.loads(base64.b64decode(raw).decode("utf-8"))
+                logging.warning("process_chunk: accepted base64-encoded payload (encoding mismatch)")
+            except Exception:
+                logging.error("process_chunk: cannot parse queue payload. First 200B=%r", raw[:200])
+                raise
         run_id     = payload["run_id"]
         shard_no   = int(payload["shard_no"])
         shard_blob = payload["shard_blob"]  # e.g., "temp/runs/<run_id>/shards/shard-00001.npz"
