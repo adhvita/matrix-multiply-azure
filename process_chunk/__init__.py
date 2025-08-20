@@ -69,7 +69,7 @@ def _write_binary_shard(run_id: str, shard_no: int, tasks: list) -> str:
 
     cont_name = f"runs/{run_id}/shards/shard-{shard_no:05d}-cont-{int(time.time())}.npz"
     _upload_bytes(TEMP_CONTAINER, cont_name, buf.getvalue(), "application/octet-stream")
-    return cont_name
+    return cont_name 
 
 def _write_part_npz(run_id: str, shard_no: int, tiles: Dict[Tuple[int,int], np.ndarray]):
     """
@@ -208,7 +208,7 @@ def main(msg: func.QueueMessage, mergeOut: func.Out[str]) -> None:
             qc.send_message(json.dumps({
                 "run_id": run_id,
                 "shard_no": shard_no,                        # same logical shard
-                "shard_blob": f"{TEMP_CONTAINER}/{cont_blob}"
+                "shard_blob": f"{cont_blob}"
             }))
             logging.info("Continuation shard queued: %s", cont_blob)
         else:
