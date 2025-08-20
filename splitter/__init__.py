@@ -16,9 +16,14 @@ PROCESS_QUEUE  = os.getenv("PROCESS_QUEUE",  "process-queue")
 def _bsc() -> BlobServiceClient:
     return BlobServiceClient.from_connection_string(os.environ["AzureWebJobsStorage"])
 
-def _qc() -> QueueClient:
+def _qc():
     qc = QueueClient.from_connection_string(os.environ["AzureWebJobsStorage"], PROCESS_QUEUE)
-    qc.create_queue()
+    try:
+        qc.create_queue()
+    except ResourceExistsError:
+        pass                      # benign race: queue already exists
+    except Exception as e:
+        logging.warning(f"Queue create check: {e}")  # don’t crash the function
     return qc
 
 # ----------------- Utils -----------------

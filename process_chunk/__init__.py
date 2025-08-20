@@ -30,9 +30,14 @@ def _cs() -> str:
 def _bsc() -> BlobServiceClient:
     return BlobServiceClient.from_connection_string(_cs())
 
-def _qc() -> QueueClient:
-    qc = QueueClient.from_connection_string(_cs(), PROCESS_QUEUE)
-    qc.create_queue()
+def _qc():
+    qc = QueueClient.from_connection_string(os.environ["AzureWebJobsStorage"], PROCESS_QUEUE)
+    try:
+        qc.create_queue()
+    except ResourceExistsError:
+        pass                      # benign race: queue already exists
+    except Exception as e:
+        logging.warning(f"Queue create check: {e}")  # don’t crash the function
     return qc
 
 def _upload_bytes(container: str, name: str, data: bytes, content_type: str):
