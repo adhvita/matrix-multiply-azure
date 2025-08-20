@@ -17,14 +17,7 @@ def _bsc() -> BlobServiceClient:
     return BlobServiceClient.from_connection_string(os.environ["AzureWebJobsStorage"])
 
 def _qc():
-    qc = QueueClient.from_connection_string(os.environ["AzureWebJobsStorage"], PROCESS_QUEUE)
-    try:
-        qc.create_queue()
-    except ResourceExistsError:
-        pass                      # benign race: queue already exists
-    except Exception as e:
-        logging.warning(f"Queue create check: {e}")  # don’t crash the function
-    return qc
+    return QueueClient.from_connection_string(os.environ["AzureWebJobsStorage"], PROCESS_QUEUE)
 
 # ----------------- Utils -----------------
 def _now_iso() -> str:
