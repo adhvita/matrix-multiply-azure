@@ -234,6 +234,7 @@ import os, io, json, base64, logging
 import azure.functions as func
 import numpy as np
 from azure.storage.blob import BlobServiceClient
+from azure.core.exceptions import ResourceNotFoundError
 
 TEMP_CONTAINER = os.getenv("TEMP_CONTAINER", "temp")
 
@@ -245,31 +246,53 @@ def _parse(msg: func.QueueMessage) -> dict:
         return json.loads(base64.b64decode(raw).decode("utf-8"))
 
 def main(msg: func.QueueMessage, mergeOut: func.Out[str]) -> None:
-    payload = _parse(msg)
+    payload   = _parse(msg)
     run_id    = payload["run_id"]
     shard_no  = int(payload["shard_no"])
-    shard_blob= payload["shard_blob"]   # e.g., "temp/runs/<run_id>/shards/shard-00001.npz"
+    shard_blob= str(payload["shard_blob"]).strip()
 
     logging.info("B: payload ok run=%s shard=%d shard_blob=%s", run_id, shard_no, shard_blob)
 
-    if "/" in shard_blob:  # container + path
-        container, name = shard_blob.split("/", 1)
-    else:                  # fallback: assume container is TEMP_CONTAINER
-        container, name = TEMP_CONTAINER, shard_blob
-
     bsc = BlobServiceClient.from_connection_string(os.environ["AzureWebJobsStorage"])
     logging.info("B: using storage account=%s", bsc.account_name)
+
+    if "/" in shard_blob:
+        container, name = shard_blob.split("/", 1)
+    else:
+        container, name = TEMP_CONTAINER, shard_blob
+    if not name:
+        logging.error("B: empty blob name after split: shard_blob=%r", shard_blob)
+        raise ValueError("Empty blob name")
+
+    # Validate container exists; if not, fall back to TEMP_CONTAINER
+    try:
+        bsc.get_container_client(container).get_container_properties()
+    except Exception:
+        logging.warning("B: container '%s' not found; falling back to %s", container, TEMP_CONTAINER)
+        container = TEMP_CONTAINER
 
     bc_in = bsc.get_blob_client(container, name)
     exists = bc_in.exists()
     logging.info("B: exists(%s/%s)=%s", container, name, exists)
     if not exists:
+        sample = [b.name for b in bsc.get_container_client(container)
+                  .list_blobs(name_starts_with=f"runs/{run_id}/shards/")]
+        logging.error("B: NOT FOUND %s/%s. Listing under runs/%s/shards: %s",
+                      container, name, run_id, sample[:10])
         raise RuntimeError("Shard blob missing")
 
-    data = bc_in.download_blob(max_concurrency=2).readall()
-    with np.load(io.BytesIO(data), allow_pickle=False) as z:
-        logging.info("B: npz keys=%s", list(z.files))
-        # no output yet; just proving this works
+    try:
+        data = bc_in.download_blob(max_concurrency=2).readall()
+    except ResourceNotFoundError:
+        logging.error("B: 404 downloading %s/%s", container, name)
+        raise
 
-    # Ack the message (no .done yet); merger will keep waiting
+    try:
+        with np.load(io.BytesIO(data), allow_pickle=False) as z:
+            logging.info("B: npz keys=%s", list(z.files))
+    except Exception as e:
+        logging.exception("B: np.load failed for %s/%s: %s", container, name, e)
+        raise
+
+    # Ack the message (no .done yet)
     mergeOut.set(json.dumps({"run_id": run_id}))
