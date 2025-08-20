@@ -61,6 +61,3 @@ def _strassen_recursive(A, B):
     C22 = add(subtract(add(M1, M3), M2), M6)
 
     return join(C11, C12, C21, C22)
-
-
-
