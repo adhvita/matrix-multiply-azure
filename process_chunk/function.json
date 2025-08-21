@@ -1,19 +1,8 @@
-{
+
+  {
     "bindings": [
-        { "type": "queueTrigger", 
-          "queueName": "process-queue", 
-          "name": "msg", 
-          "direction": "in", 
-          "connection": "AzureWebJobsStorage" 
-      }
-      ,
-      {
-        "name": "mergeOut",
-        "type": "queue",
-        "direction": "out",
-        "queueName": "matrix-merge",
-        "connection": "AzureWebJobsStorage"
-      }
+      { "type": "queueTrigger", "name": "msg", "direction": "in",
+        "queueName": "process-queue", "connection": "AzureWebJobsStorage" }
     ],
     "scriptFile": "__init__.py"
   }
