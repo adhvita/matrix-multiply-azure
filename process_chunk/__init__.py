@@ -250,6 +250,7 @@ def main(msg: func.QueueMessage, mergeOut: func.Out[str]) -> None:
     shard_no  = int(payload["shard_no"])
     shard_blob= payload["shard_blob"].strip()  # "temp/runs/.../shard-00001.npz"
 
+
     if "/" in shard_blob:
         container, name = shard_blob.split("/", 1)
     else:
