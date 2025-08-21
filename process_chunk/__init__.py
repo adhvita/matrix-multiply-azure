@@ -230,10 +230,16 @@
 #         logging.exception("process_chunk failed")
 #         raise
 
+import logging, os
+logging.warning("process_chunk: MODULE LOADED build=%s", os.getenv("WEBSITE_INSTANCE_ID", "local"))
 import os, io, json, base64, logging
+logging.warning("process_chunk: Json MODULE LOADED build=%s", os.getenv("WEBSITE_INSTANCE_ID", "local"))
 import azure.functions as func
+logging.warning("process_chunk: func MODULE LOADED build=%s", os.getenv("WEBSITE_INSTANCE_ID", "local"))
 import numpy as np
+logging.warning("process_chunk: numpy MODULE LOADED build=%s", os.getenv("WEBSITE_INSTANCE_ID", "local"))
 from azure.storage.blob import BlobServiceClient, ContentSettings
+logging.warning("process_chunk: blob storage MODULE LOADED build=%s", os.getenv("WEBSITE_INSTANCE_ID", "local"))
 
 TEMP_CONTAINER = os.getenv("TEMP_CONTAINER", "temp")
 
@@ -248,53 +254,50 @@ def main(msg: func.QueueMessage, mergeOut: func.Out[str]) -> None:
     payload   = _parse(msg)
     run_id    = payload["run_id"]
     shard_no  = int(payload["shard_no"])
-    shard_blob= payload["shard_blob"].strip()  # "temp/runs/.../shard-00001.npz"
+    shard_blob= str(payload["shard_blob"]).strip()
 
+    logging.info("B: payload ok run=%s shard=%d shard_blob=%s", run_id, shard_no, shard_blob)
+
+    bsc = BlobServiceClient.from_connection_string(os.environ["AzureWebJobsStorage"])
+    logging.info("B: using storage account=%s", bsc.account_name)
 
     if "/" in shard_blob:
         container, name = shard_blob.split("/", 1)
     else:
         container, name = TEMP_CONTAINER, shard_blob
+    if not name:
+        logging.error("B: empty blob name after split: shard_blob=%r", shard_blob)
+        raise ValueError("Empty blob name")
 
-    bsc = BlobServiceClient.from_connection_string(os.environ["AzureWebJobsStorage"])
+    # Validate container exists; if not, fall back to TEMP_CONTAINER
+    try:
+        bsc.get_container_client(container).get_container_properties()
+    except Exception:
+        logging.warning("B: container '%s' not found; falling back to %s", container, TEMP_CONTAINER)
+        container = TEMP_CONTAINER
+
     bc_in = bsc.get_blob_client(container, name)
-    data = bc_in.download_blob(max_concurrency=2).readall()
+    exists = bc_in.exists()
+    logging.info("B: exists(%s/%s)=%s", container, name, exists)
+    if not exists:
+        sample = [b.name for b in bsc.get_container_client(container)
+                  .list_blobs(name_starts_with=f"runs/{run_id}/shards/")]
+        logging.error("B: NOT FOUND %s/%s. Listing under runs/%s/shards: %s",
+                      container, name, run_id, sample[:10])
+        raise RuntimeError("Shard blob missing")
 
-    # --- open shard ---
-    with np.load(io.BytesIO(data), allow_pickle=False) as z:
-        N = int(z["N"])
-        logging.info("proc: N=%d keys=%s", N, list(z.files))
+    try:
+        data = bc_in.download_blob(max_concurrency=2).readall()
+    except ResourceNotFoundError:
+        logging.error("B: 404 downloading %s/%s", container, name)
+        raise
 
-        # Take just ONE task to prove output is correct
-        A = z["A_000"]; B = z["B_000"]
-        # Use NumPy first. Once this works, switch to your Strassen().
-        C = A @ B
+    try:
+        with np.load(io.BytesIO(data), allow_pickle=False) as z:
+            logging.info("B: npz keys=%s", list(z.files))
+    except Exception as e:
+        logging.exception("B: np.load failed for %s/%s: %s", container, name, e)
+        raise
 
-    # --- write a tiny part file ---
-    part_payload = {
-        "M": np.array(1, dtype=np.int64),
-        "i0": np.array([int(0)], dtype=np.int32),
-        "j0": np.array([int(0)], dtype=np.int32),
-        "bi": np.array([int(C.shape[0])], dtype=np.int32),
-        "bj": np.array([int(C.shape[1])], dtype=np.int32),
-        "C_000": C.astype(np.float32, copy=False),
-    }
-    buf = io.BytesIO(); np.savez(buf, **part_payload); buf.seek(0)
-
-    part_name = f"runs/{run_id}/parts/part-{shard_no:05d}.npz"
-    bsc.get_blob_client(TEMP_CONTAINER, part_name).upload_blob(
-        buf.getvalue(), overwrite=True,
-        content_settings=ContentSettings(content_type="application/octet-stream")
-    )
-    logging.info("proc: wrote %s", part_name)
-
-    # --- mark shard done ---
-    done_name = f"runs/{run_id}/parts/part-{shard_no:05d}.done"
-    bsc.get_blob_client(TEMP_CONTAINER, done_name).upload_blob(
-        b"ok", overwrite=True,
-        content_settings=ContentSettings(content_type="text/plain")
-    )
-    logging.info("proc: wrote %s", done_name)
-
-    # Notify merger (idempotent)
-    mergeOut.set(json.dumps({"run_id": run_id, "shard_no": shard_no}))
+    # Ack the message (no .done yet)
+    mergeOut.set(json.dumps({"run_id": run_id}))
