@@ -47,3 +47,4 @@ Dockerfile
 .dockerignore
 .DS_Store
 matrixmultiplication.PublishSettings
+.python-version

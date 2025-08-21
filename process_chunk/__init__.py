@@ -242,6 +242,19 @@ from azure.storage.blob import BlobServiceClient, ContentSettings
 logging.warning("process_chunk: blob storage MODULE LOADED build=%s", os.getenv("WEBSITE_INSTANCE_ID", "local"))
 
 TEMP_CONTAINER = os.getenv("TEMP_CONTAINER", "temp")
+def _load_strassen():
+    try:
+        from strassen_algo.strassen_module import strassen as _s   # absolute
+        return _s
+    except Exception as e_abs:
+        try:
+            from ..strassen_algo.strassen_module import strassen as _srel  # relative
+            return _srel
+        except Exception as e_rel:
+            logging.warning("process_chunk: Strassen import failed (abs=%r, rel=%r). Using np.matmul.", e_abs, e_rel)
+            import numpy as _np
+            return lambda A, B: _np.matmul(A, B)
+
 
 def _parse(msg: func.QueueMessage) -> dict:
     raw = msg.get_body()
@@ -260,6 +273,9 @@ def main(msg: func.QueueMessage, mergeOut: func.Out[str]) -> None:
 
     bsc = BlobServiceClient.from_connection_string(os.environ["AzureWebJobsStorage"])
     logging.info("B: using storage account=%s", bsc.account_name)
+    smm = _load_strassen()
+    C = smm(A, B)
+
 
     if "/" in shard_blob:
         container, name = shard_blob.split("/", 1)
