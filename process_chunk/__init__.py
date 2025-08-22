@@ -230,17 +230,79 @@
 #         logging.exception("process_chunk failed")
 #         raise
 
-import logging, os
-logging.warning("process_chunk: MODULE LOADED build=%s", os.getenv("WEBSITE_INSTANCE_ID", "local"))
-import os, io, json, base64, logging
-logging.warning("process_chunk: Json MODULE LOADED build=%s", os.getenv("WEBSITE_INSTANCE_ID", "local"))
+import os
+import logging
 import azure.functions as func
-logging.warning("process_chunk: func MODULE LOADED build=%s", os.getenv("WEBSITE_INSTANCE_ID", "local"))
-import numpy as np
-logging.warning("process_chunk: numpy MODULE LOADED build=%s", os.getenv("WEBSITE_INSTANCE_ID", "local"))
-from azure.storage.blob import BlobServiceClient, ContentSettings
-logging.warning("process_chunk: blob storage MODULE LOADED build=%s", os.getenv("WEBSITE_INSTANCE_ID", "local"))
 
-def main(msg: func.QueueMessage) -> None:
-    body = msg.get_body()
-    logging.warning("process_chunk: INVOKED len=%d first200=%r", len(body), body[:200])
+# Banner – must appear on cold start if the module loads
+logging.warning("process_chunk: MODULE LOADED build=%s",
+                os.getenv("WEBSITE_INSTANCE_ID", "local"))
+
+def _np():
+    # Lazy numpy import – prevents native wheel load at module import time
+    import numpy as _numpy
+    return _numpy
+
+def _bsc():
+    from azure.storage.blob import BlobServiceClient  # lazy
+    cs = os.environ.get("AzureWebJobsStorage")
+    if not cs:
+        raise RuntimeError("AzureWebJobsStorage not set")
+    return BlobServiceClient.from_connection_string(cs)
+
+def _qc():
+    from azure.storage.queue import QueueClient       # lazy
+    return QueueClient.from_connection_string(os.environ["AzureWebJobsStorage"],
+                                              os.getenv("PROCESS_QUEUE", "process-queue"))
+
+def _load_strassen():
+    try:
+        from strassen_algo.strassen_module import strassen as _s
+        return _s
+    except Exception as e_abs:
+        try:
+            from ..strassen_algo.strassen_module import strassen as _srel
+            return _srel
+        except Exception as e_rel:
+            logging.warning("process_chunk: Strassen import failed (abs=%r, rel=%r). Using np.matmul.", e_abs, e_rel)
+            np = _np()
+            return lambda A, B: np.matmul(A, B)
+
+def main(msg: func.QueueMessage, mergeOut: func.Out[str]) -> None:
+    import json, base64, io, time
+    logging.warning("process_chunk: INVOKE START")
+    raw = msg.get_body()
+    try:
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except Exception:
+            payload = json.loads(base64.b64decode(raw).decode("utf-8"))
+    except Exception:
+        logging.error("process_chunk: cannot parse payload, first200=%r", raw[:200])
+        raise
+
+    run_id     = payload["run_id"]
+    shard_no   = int(payload["shard_no"])
+    shard_blob = payload["shard_blob"]  # e.g. temp/runs/.../shard-00001.npz
+    logging.warning("process_chunk: payload ok run=%s shard=%d blob=%s", run_id, shard_no, shard_blob)
+
+    # Resolve container/blob
+    if "/" in shard_blob:
+        container, name = shard_blob.split("/", 1)
+    else:
+        container, name = os.getenv("TEMP_CONTAINER", "temp"), shard_blob
+
+    bsc = _bsc()
+    bc_in = bsc.get_blob_client(container, name)
+    if not bc_in.exists():
+        logging.error("process_chunk: blob missing %s/%s", container, name)
+        raise RuntimeError("shard blob missing")
+
+    data = bc_in.download_blob(max_concurrency=2).readall()
+    np = _np()
+    with np.load(io.BytesIO(data), allow_pickle=False) as z:
+        logging.warning("process_chunk: npz keys=%s", list(z.files))
+        # minimal success: acknowledge to merger
+        mergeOut.set(json.dumps({"run_id": run_id, "shard_no": shard_no}))
+
+    logging.warning("process_chunk: INVOKE END")
