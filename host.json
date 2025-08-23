@@ -1,6 +1,7 @@
 {
   "version": "2.0",
   "functionTimeout": "00:09:00",
+  "logging": { "logLevel": { "Function": "Trace", "Host.Results": "Trace", "Host.Aggregator": "Trace" } },
   "extensionBundle": { "id": "Microsoft.Azure.Functions.ExtensionBundle", "version": "[3.*, 4.0.0)" },
   "extensions": {
     "queues": {

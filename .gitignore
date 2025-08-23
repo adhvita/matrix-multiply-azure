@@ -51,3 +51,4 @@ matrixmultiplication.PublishSettings
 pyenvs 3.10, not condas
 \#/
 use/
+.azurite/

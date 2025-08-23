@@ -23,12 +23,15 @@ def _qc():
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-def _send_shard_msg(qc: QueueClient, run_id: str, shard_no: int, shard_path: str):
-    qc.send_message(json.dumps({
+def _send_shard_msg(queueOut: func.Out[str], run_id: str, shard_no: int, shard_path: str):
+    msg = {
         "run_id": run_id,
         "shard_no": shard_no,
         "shard_blob": f"{TEMP_CONTAINER}/{shard_path}"
-    }))
+    }
+    _qc.queueOut.set(json.dumps(msg))
+
+
 
 def _upload_bytes(container: str, name: str, data: bytes, content_type: str):
     _bsc().get_blob_client(container, name).upload_blob(
@@ -121,12 +124,14 @@ def main(inBlob: func.InputStream, queueOut: func.Out[str]):
 
     def flush():
         nonlocal shard_idx, tasks, tiles_in_shard
-        if not tasks: return
+        if not tasks:
+            return
         shard_idx += 1
         shard_blob = _write_binary_shard(run_id, shard_idx, tasks)
-        _send_shard_msg(qc, run_id, shard_idx, shard_blob)
+        _send_shard_msg(queueOut, run_id, shard_idx, shard_blob)  # ← use binding
         logging.info("Shard %d written (.npz): tasks=%d", shard_idx, len(tasks))
-        tasks.clear(); tiles_in_shard = 0
+        tasks.clear()
+        tiles_in_shard = 0
 
     for i0 in range(0, m, block):
         bi = min(block, m - i0)
