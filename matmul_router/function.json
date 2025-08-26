@@ -1,0 +1,16 @@
+{
+  "bindings": [
+    {
+      "name": "inputBlob",
+      "type": "blobTrigger",
+      "direction": "in",
+      "path": "inputs/{name}",
+      "connection": "AzureWebJobsStorage"
+    },
+    {
+      "type": "orchestrationClient",
+      "name": "starter",
+      "direction": "in"
+    }
+  ]
+}
