@@ -1,7 +1,7 @@
 import logging, os, io, json, math
 import numpy as np
 from azure.storage.blob import BlobServiceClient, ContentSettings
-from ..shared.strassen import strassen_rectangular
+from shared.strassen_module import strassen_rectangular
 
 def _logger():
     lg = logging.getLogger("activity")
