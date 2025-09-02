@@ -37,7 +37,7 @@ def _upload_npy(cc, name: str, arr: np.ndarray):
     cc.upload_blob(name, buf.getvalue(), overwrite=True,
                    content_settings=ContentSettings(content_type="application/octet-stream"))
 
-def main(inputBlob: func.InputStream, starter: str):
+async def main(inputBlob: func.InputStream, starter: str):
     # Durable client binding
     import azure.durable_functions as df
     client = df.DurableOrchestrationClient(starter)
@@ -91,7 +91,8 @@ def main(inputBlob: func.InputStream, starter: str):
     if N > MAX_DIM_SINGLE or pad_ratio > PAD_RATIO_LIMIT:
         reason = "N>MAX_DIM_SINGLE" if N > MAX_DIM_SINGLE else f"pad_ratio>{PAD_RATIO_LIMIT}"
         logger.info(f"Routing to Durable ({reason}).")
-        instance_id = client.start_new("orchestrator", None, {
+
+        instance_id = await client.start_new("orchestrator", None, {
             "input_container": "inputs",
             "input_blob": name.split("/", 1)[-1],
             "temp_container": TEMP_CONTAINER,
