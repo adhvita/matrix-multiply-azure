@@ -2,7 +2,7 @@ import azure.functions as func
 from azure.storage.blob import BlobServiceClient, ContentSettings
 import os, io, time, json, logging
 import numpy as np
-
+import uuid, pathlib
 # CHANGE: also import next_pow2 for the pad-ratio guard
 from shared.strassen_module import strassen_rectangular, next_pow2
 
@@ -13,6 +13,13 @@ STRASSEN_THRESHOLD  = int(os.getenv("STRASSEN_THRESHOLD", "1024")) # high crosso
 MAX_DIM_SINGLE      = int(os.getenv("MAX_DIM_SINGLE", "6144"))     # route big to Durable
 TILE_SIZE           = int(os.getenv("TILE_SIZE", "2048"))          # Durable tile size
 TEMP_CONTAINER      = os.getenv("TEMP_CONTAINER", "temp")          # tiles/partials
+
+RUN_LOG_DIR = pathlib.Path(os.getenv("LOCAL_RUN_LOG_DIR", "./runs"))
+RUN_LOG_DIR.mkdir(parents=True, exist_ok=True)
+def jlog(payload: dict, fname: str = "local_metrics.jsonl"):
+    # append structured line to runs/local_metrics.jsonl
+    with (RUN_LOG_DIR / fname).open("a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 # CHANGE: read PAD_RATIO_LIMIT from env (used later, inside main)
 PAD_RATIO_LIMIT     = float(os.getenv("PAD_RATIO_LIMIT", "1.5"))
@@ -66,11 +73,24 @@ async def main(inputBlob: func.InputStream, starter: str):
         return
 
     N = int(A.shape[0])
+    try:
+        base = name.split("/")[-1]
+        run_id = base[:-4] if base.lower().endswith(".npz") else base
+    except Exception:
+        run_id = str(uuid.uuid4())      
 
     # CHANGE: compute pad ratio *after* we know N
     P = next_pow2(N)
     pad_ratio = P / float(N)
-
+    common_ctx = {
+    "ts": time.time(),
+    "run_id": run_id,
+    "N": N,
+    "dtype": str(A.dtype),
+    "threshold": STRASSEN_THRESHOLD,
+    "tile": TILE_SIZE,
+    "pad_ratio": pad_ratio
+    }
     target_dtype = np.float32 if DEFAULT_DTYPE == "float32" else np.float64
     if A.dtype != target_dtype:
         logger.info(f"Coercing A from {A.dtype} -> {target_dtype}")
@@ -92,7 +112,7 @@ async def main(inputBlob: func.InputStream, starter: str):
         reason = "N>MAX_DIM_SINGLE" if N > MAX_DIM_SINGLE else f"pad_ratio>{PAD_RATIO_LIMIT}"
         logger.info(f"Routing to Durable ({reason}).")
 
-        instance_id = await client.start_new("orchestrator", None, {
+        run_id = await client.start_new("orchestrator", None, {
             "input_container": "inputs",
             "input_blob": name.split("/", 1)[-1],
             "temp_container": TEMP_CONTAINER,
@@ -101,6 +121,18 @@ async def main(inputBlob: func.InputStream, starter: str):
             "dtype": "float32" if target_dtype==np.float32 else "float64",
             "strassen_threshold": STRASSEN_THRESHOLD
         })
+        logger.info(f"Started durable instance: {run_id}")
+        instance_id = await client.start_new("orchestrator", None, orchestrator_input)
+
+        payload = dict(common_ctx)
+        payload.update({
+            "mode": "durable_start",
+            "instance_id": instance_id,
+            "output": None
+        })
+        jlog(payload)                      # local JSONL
+        logger.info(json.dumps(payload))   # cloud trace
+
         logger.info(f"Started durable instance: {instance_id}")
         return
 
@@ -112,16 +144,26 @@ async def main(inputBlob: func.InputStream, starter: str):
 
     out_blob = f"C_{N}x{N}_{'float32' if target_dtype==np.float32 else 'float64'}.npy"
     _upload_npy(out_cc, out_blob, C)
-
-    logger.info(json.dumps({
+    
+    payload = dict(common_ctx)
+    payload.update({
         "mode": "inline",
-        "N": N,
-        "dtype": str(A.dtype),
-        "threshold": STRASSEN_THRESHOLD,
-        "pad_ratio": round(pad_ratio, 6),
         "compute_sec": round(t1 - t0, 6),
         "output": f"{OUTPUT_CONTAINER}/{out_blob}"
-    }))
+    })
+    jlog(payload)
+    logger.info(json.dumps(payload))
+    return
+
+    # logger.info(json.dumps({
+    #     "mode": "inline",
+    #     "N": N,
+    #     "dtype": str(A.dtype),
+    #     "threshold": STRASSEN_THRESHOLD,
+    #     "pad_ratio": round(pad_ratio, 6),
+    #     "compute_sec": round(t1 - t0, 6),
+    #     "output": f"{OUTPUT_CONTAINER}/{out_blob}"
+    # }))
 
 # import azure.functions as func
 # from azure.storage.blob import BlobServiceClient, ContentSettings

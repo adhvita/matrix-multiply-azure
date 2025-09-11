@@ -1,6 +1,8 @@
 
 {
   "version": "2.0",
+  "logging": { "logLevel": { "default": "Information" },
+  "applicationInsights": { "samplingSettings": { "isEnabled": false } } },
   "functionTimeout": "00:09:30",
   "extensionBundle": {
     "id": "Microsoft.Azure.Functions.ExtensionBundle",

@@ -52,3 +52,6 @@ pyenvs 3.10, not condas
 \#/
 use/
 .azurite/
+runs-local-inline-0/
+runs-local-profileAB-inlineDurable/
+tools/

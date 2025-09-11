@@ -1,7 +1,35 @@
-import logging, os, io, json, math
+import logging, os, io, json, math, pathlib, uuid
 import numpy as np
+import time 
 from azure.storage.blob import BlobServiceClient, ContentSettings
 from shared.strassen_module import strassen_rectangular
+# helper to download raw bytes + count
+def _download_blob_bytes(cc, name: str):
+    data = cc.get_blob_client(name).download_blob().readall()
+    return data, len(data)
+def _upload_npy_with_size(cc, name: str, arr: np.ndarray) -> int:
+    """
+    Save a NumPy array as .npy to the given container client `cc`
+    under blob `name`, overwrite if exists, and return the byte size written.
+    """
+    buf = io.BytesIO()
+    # avoid pickling (numeric arrays only)
+    np.save(buf, arr, allow_pickle=False)
+    data = buf.getvalue()
+    cc.upload_blob(
+        name,
+        data,
+        overwrite=True,
+        content_settings=ContentSettings(content_type="application/octet-stream"),
+    )
+    return len(data)
+
+RUN_LOG_DIR = pathlib.Path(os.getenv("LOCAL_RUN_LOG_DIR", "./runs"))
+RUN_LOG_DIR.mkdir(parents=True, exist_ok=True)
+def jlog(payload: dict, fname: str = "local_metrics.jsonl"):
+    # append structured line to runs/local_metrics.jsonl
+    with (RUN_LOG_DIR / fname).open("a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 def _logger():
     lg = logging.getLogger("activity")
@@ -32,10 +60,13 @@ def _save_npy_to_blob(cc, name, arr: np.ndarray):
 def _dtype_of(s: str):
     return np.float32 if s == "float32" else np.float64
 
+
 def main(payload: dict) -> dict:
     logger = _logger()
     op = payload.get("op")
     bsc = _bsc()
+    run_id = payload.get("run_id") or f"local-{uuid.uuid4()}"
+    _i = payload.get("i"); _j = payload.get("j"); _k = payload.get("k")
 
     if op == "prepare_tiles":
         icc = bsc.get_container_client(payload["input_container"])
@@ -43,15 +74,32 @@ def main(payload: dict) -> dict:
         tile = int(payload["tile"])
         dt = _dtype_of(payload["dtype"])
 
+        # CHANGE: start timing & byte counters
+        t0 = time.time()
+        bytes_in = 0
+        bytes_out = 0
+
+        # CHANGE: count input bytes (pair npz)
+        data, nbytes = _download_blob_bytes(icc, payload["input_blob"])
+        bytes_in += nbytes
+
         npz = _load_npz_from_blob(icc, payload["input_blob"])
         if not ("A" in npz and "B" in npz): raise ValueError("NPZ missing A,B")
         A = np.array(npz["A"], copy=False); B = np.array(npz["B"], copy=False)
         if A.shape != B.shape or A.ndim != 2 or A.shape[0] != A.shape[1]:
             raise ValueError(f"Invalid shapes: A{A.shape} B{B.shape}")
+        
+        # CHANGE: trust content N; warn if payload carries a mismatched N
+        N_content = int(A.shape[0])
+        if "N" in payload and int(payload["N"]) != N_content:
+            logger.warning(f"prepare_tiles: payload N={payload['N']} != content N={N_content}; using content")
+        N = N_content
+
         N = int(A.shape[0])
         if A.dtype != dt: A = A.astype(dt, copy=False)
         if B.dtype != dt: B = B.astype(dt, copy=False)
 
+        logger = logging.getLogger("activity")
         tiles = math.ceil(N / tile)
         logger.info(f"prepare_tiles: N={N}, tile={tile}, tiles_per_side={tiles}")
 
@@ -75,6 +123,17 @@ def main(payload: dict) -> dict:
 
         # Manifest artifact (optional)
         _save_npy_to_blob(tcc, "manifest.npy", np.array([N, tile, tiles], dtype=np.int64))
+        # CHANGE: per-op structured record
+        t1 = time.time()
+        rec = {
+            "ts": time.time(), "run_id": run_id, "op": "prepare_tiles",
+            "N": N, "tile": tile, "i": _i, "j": _j, "k": _k,
+            "bytes_in": int(bytes_in), "bytes_out": int(bytes_out),
+            "dur_ms": int((t1 - t0) * 1000)
+        }
+        jlog(rec, fname=f"run_{run_id}.jsonl")
+        logger.info(json.dumps(rec))
+
         return {"N": N, "tile": tile, "tiles": tiles}
 
     elif op == "multiply_tile_rowcol":
@@ -83,6 +142,11 @@ def main(payload: dict) -> dict:
         tiles = int(payload["tiles"]); tile = int(payload["tile"])
         dt = _dtype_of(payload["dtype"])
         thr = int(payload["strassen_threshold"])
+
+        # CHANGE: start timing & byte counters
+        t0 = time.time()
+        bytes_in = 0
+        bytes_out = 0
 
         partials = []
         for q in range(tiles):
@@ -98,6 +162,21 @@ def main(payload: dict) -> dict:
             p = f"partials/part_{i}_{q}_{j}.npy"
             _save_npy_to_blob(tcc, p, Cpart.astype(dt, copy=False))
             partials.append(p)
+            # CHANGE: measure write size
+            bytes_out += _upload_npy_with_size(tcc, p, Cpart.astype(dt, copy=False))
+            partials.append(p)
+
+        # CHANGE: per-op structured record
+        t1 = time.time()
+        rec = {
+            "ts": time.time(), "run_id": run_id, "op": "multiply_tile_rowcol",
+            "N": int(payload.get("N", tiles * tile)), "tile": tile, "i": i, "j": j,
+            "bytes_in": int(bytes_in), "bytes_out": int(bytes_out),
+            "dur_ms": int((t1 - t0) * 1000)
+        }
+        jlog(rec, fname=f"run_{run_id}.jsonl")
+        logger.info(json.dumps(rec))
+
         return {"i": i, "j": j, "partials": partials}
 
     elif op == "reduce_partials":
@@ -106,12 +185,28 @@ def main(payload: dict) -> dict:
         tile = int(payload["tile"])
         dt = _dtype_of(payload["dtype"])
 
+        # CHANGE: start timing & byte counters
+        t0 = time.time()
+        bytes_in = 0
+        bytes_out = 0
+
         acc = None
         for p in payload["partials"]:
             Cpart = _load_npy_from_blob(tcc, p)
             acc = Cpart if acc is None else (acc + Cpart)
         out_name = f"C_{i}_{j}.npy"
         _save_npy_to_blob(tcc, out_name, acc.astype(dt, copy=False))
+        # CHANGE: per-op structured record
+        t1 = time.time()
+        rec = {
+            "ts": time.time(), "run_id": run_id, "op": "reduce_partials",
+            "N": int(payload.get("N", 0)), "tile": tile, "i": i, "j": j,
+            "bytes_in": int(bytes_in), "bytes_out": int(bytes_out),
+            "dur_ms": int((t1 - t0) * 1000)
+        }
+        jlog(rec, fname=f"run_{run_id}.jsonl")
+        logger.info(json.dumps(rec))
+
         return {"i": i, "j": j, "tile": tile, "name": out_name}
 
     elif op == "merge_tiles":
@@ -119,6 +214,11 @@ def main(payload: dict) -> dict:
         occ = bsc.get_container_client(payload["output_container"])
         N = int(payload["N"]); tile = int(payload["tile"]); tiles = int(payload["tiles"])
         dt = _dtype_of(payload["dtype"])
+
+        # CHANGE: start timing & byte counters
+        t0 = time.time()
+        bytes_in = 0
+        bytes_out = 0
 
         C = np.zeros((N, N), dtype=dt)
         for i in range(tiles):
@@ -131,6 +231,17 @@ def main(payload: dict) -> dict:
         out_blob = f"C_{N}x{N}_{'float32' if dt==np.float32 else 'float64'}.npy"
         _save_npy_to_blob(occ, out_blob, C)
         logger.info(json.dumps({"merged": out_blob, "N": N, "tile": tile, "tiles": tiles}))
+        # CHANGE: per-op structured record (+ a durable_done summary)
+        t1 = time.time()
+        rec = {
+            "ts": time.time(), "run_id": run_id, "op": "merge_tiles",
+            "N": N, "tile": tile,
+            "bytes_in": int(bytes_in), "bytes_out": int(bytes_out),
+            "dur_ms": int((t1 - t0) * 1000),
+            "output": out_blob
+        }
+        jlog(rec, fname=f"run_{run_id}.jsonl")
+        logger.info(json.dumps(rec))
         return out_blob
 
     else:
