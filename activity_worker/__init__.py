@@ -30,19 +30,13 @@ OUTPUT_CONTAINER    = os.getenv("OUTPUT_CONTAINER", "output-container")
 RUN_LOG_CONTAINER   = os.getenv("RUN_LOG_CONTAINER", OUTPUT_CONTAINER)
 RUN_LOG_PREFIX      = os.getenv("RUN_LOG_PREFIX", "runs/")
 
-def jlog(payload: dict):
-    line = json.dumps(payload, ensure_ascii=False)
-    logging.getLogger("router").info(line)  # App Insights
-
-    # append to blob: <RUN_LOG_CONTAINER>/<RUN_LOG_PREFIX>run_<run_id>.jsonl
+def jlog(rec: dict):
+    line = json.dumps(rec, ensure_ascii=False)
+    log.info(line)  # App Insights
     try:
-        run_id = payload.get("run_id", "unknown")
-        cc = _bsc().get_container_client(RUN_LOG_CONTAINER)
-        blob_name = f"{RUN_LOG_PREFIX}run_{run_id}.jsonl"
-        _append_blob_line(cc, blob_name, line)
+        _append_blob_line(bsc, RUN_LOG_CONTAINER, f"{RUN_LOG_PREFIX}run_{run_id}.jsonl", line)
     except Exception as e:
-        logging.getLogger("router").warning(f"blob-append-log failed: {e}")
-
+        log.warning(f"blob-append-log failed: {e}")
 
 def _logger():
     lg = logging.getLogger("activity")
@@ -55,6 +49,17 @@ def _logger():
               "NUMEXPR_NUM_THREADS","VECLIB_MAXIMUM_THREADS"]:
         os.environ.setdefault(v, "1")
     return lg
+
+def _append_blob_line(bsc, container: str, blobname: str, text: str):
+    # CHANGED: write logs to an AppendBlob in *output* storage only
+    from azure.core.exceptions import ResourceExistsError
+    cc = bsc.get_container_client(container)
+    bc = cc.get_blob_client(blobname)
+    try:
+        bc.create_append_blob()
+    except ResourceExistsError:
+        pass
+    bc.append_block((text + "\n").encode("utf-8"))
 
 def _bsc():
     return BlobServiceClient.from_connection_string(os.environ["AzureWebJobsStorage"])
