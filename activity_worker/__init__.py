@@ -21,7 +21,7 @@ def _upload_npy_with_size(cc, name: str, arr: np.ndarray) -> int:
 
 def _safe_run_dir():
     p = pathlib.Path(os.getenv("LOCAL_RUN_LOG_DIR") or
-                     ("/tmp/runs" if os.getenv("WEBSITE_INSTANCE_ID") else "./runs"))
+                     ("/temp/runs" if os.getenv("WEBSITE_INSTANCE_ID") else "./runs"))
     try: p.mkdir(parents=True, exist_ok=True)
     except Exception: pass
     return p
