@@ -19,10 +19,13 @@ RUN_LOG_PREFIX      = os.getenv("RUN_LOG_PREFIX", "runs/")
 def jlog(payload: dict):
     line = json.dumps(payload, ensure_ascii=False)
     logging.getLogger("router").info(line)  # App Insights
+
+    # append to blob: <RUN_LOG_CONTAINER>/<RUN_LOG_PREFIX>run_<run_id>.jsonl
     try:
-        cc = _blob_client().get_container_client(RUN_LOG_CONTAINER)
         run_id = payload.get("run_id", "unknown")
-        _append_blob_line(cc, f"{RUN_LOG_PREFIX}run_{run_id}.jsonl", line)
+        cc = _blob_client().get_container_client(RUN_LOG_CONTAINER)
+        blob_name = f"{RUN_LOG_PREFIX}run_{run_id}.jsonl"
+        _append_blob_line(cc, blob_name, line)
     except Exception as e:
         logging.getLogger("router").warning(f"blob-append-log failed: {e}")
 
@@ -125,6 +128,7 @@ async def main(inputBlob: func.InputStream, starter: str):
         logger.info(f"Routing to Durable ({reason}).")
 
         instance_id = await client.start_new("orchestrator", None, {
+            "run_id": run_id,
             "input_container": "inputs",
             "input_blob": name.split("/", 1)[-1],
             "temp_container": TEMP_CONTAINER,

@@ -26,19 +26,22 @@ def _append_blob_line(cc, name: str, text: str):
     except ResourceExistsError:
         pass
     bc.append_block((text + "\n").encode("utf-8"))
+RUN_LOG_CONTAINER   = os.getenv("RUN_LOG_CONTAINER", OUTPUT_CONTAINER)
+RUN_LOG_PREFIX      = os.getenv("RUN_LOG_PREFIX", "runs/")
 
-def jlog(payload: dict, *, out_cc, prefix: str = "runs/"):
-    """
-    Append one structured JSON line to an append-blob under:
-        <output_container>/<prefix>/run_<run_id>.jsonl
-    """
+def jlog(payload: dict):
     line = json.dumps(payload, ensure_ascii=False)
-    logging.getLogger("activity").info(line)  # surfaces in App Insights
+    logging.getLogger("router").info(line)  # App Insights
+
+    # append to blob: <RUN_LOG_CONTAINER>/<RUN_LOG_PREFIX>run_<run_id>.jsonl
     try:
         run_id = payload.get("run_id", "unknown")
-        _append_blob_line(out_cc, f"{prefix}run_{run_id}.jsonl", line)
+        cc = _bsc().get_container_client(RUN_LOG_CONTAINER)
+        blob_name = f"{RUN_LOG_PREFIX}run_{run_id}.jsonl"
+        _append_blob_line(cc, blob_name, line)
     except Exception as e:
-        logging.getLogger("activity").warning(f"blob-append-log failed: {e}")
+        logging.getLogger("router").warning(f"blob-append-log failed: {e}")
+
 
 def _logger():
     lg = logging.getLogger("activity")
