@@ -158,7 +158,7 @@ async def main(inputBlob: func.InputStream, starter: str):
     C = strassen_rectangular(A, B, threshold=STRASSEN_THRESHOLD, logger=logger)
     t1 = time.time()
 
-    out_blob = f"C_{N}x{N}_{'float32' if target_dtype==np.float32 else 'float64'}.npy"
+    out_blob = f"C_{N}x{N}_{'float32' if target_dtype==np.float32 else 'float64'}_{t1}.npy"
     _upload_npy(out_cc, out_blob, C)
     
     payload = dict(common_ctx)

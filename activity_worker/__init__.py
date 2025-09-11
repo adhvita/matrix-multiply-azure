@@ -26,6 +26,7 @@ def _append_blob_line(cc, name: str, text: str):
     except ResourceExistsError:
         pass
     bc.append_block((text + "\n").encode("utf-8"))
+OUTPUT_CONTAINER    = os.getenv("OUTPUT_CONTAINER", "output-container")
 RUN_LOG_CONTAINER   = os.getenv("RUN_LOG_CONTAINER", OUTPUT_CONTAINER)
 RUN_LOG_PREFIX      = os.getenv("RUN_LOG_PREFIX", "runs/")
 
@@ -214,11 +215,10 @@ def main(payload: dict) -> dict:
                 Tij = _load_npy_from_blob(tcc, f"C_{i}_{j}.npy")
                 bytes_in += int(Tij.nbytes)
                 C[r0:r1, c0:c1] = Tij[:(r1-r0), :(c1-c0)]
-
-        out_blob = f"C_{N}x{N}_{dtype_str}.npy"
+        t1 = time.time()
+        out_blob = f"C_{N}x{N}_{dtype_str}_{t1}.npy"
         bytes_out += _upload_npy_with_size(occ, out_blob, C)
 
-        t1 = time.time()
         rec = {
             "ts": time.time(), "run_id": run_id, "op": "merge_tiles",
             "N": N, "tile": tile, "tiles": tiles, "dtype": dtype_str,
