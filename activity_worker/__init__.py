@@ -26,10 +26,46 @@ def _upload_npy_with_size(cc, name: str, arr: np.ndarray) -> int:
 
 RUN_LOG_DIR = pathlib.Path(os.getenv("LOCAL_RUN_LOG_DIR", "./runs"))
 RUN_LOG_DIR.mkdir(parents=True, exist_ok=True)
+def _safe_run_dir() -> pathlib.Path:
+    p = pathlib.Path(os.getenv("LOCAL_RUN_LOG_DIR") or ("/tmp/runs" if os.getenv("WEBSITE_INSTANCE_ID") else "./runs"))
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        # final fallback
+        p = pathlib.Path("/tmp/runs")
+        p.mkdir(parents=True, exist_ok=True)
+    return p
+RUN_LOG_DIR = _safe_run_dir()
+
+def _append_blob_line(cc, name: str, text: str):
+    bc = cc.get_blob_client(name)
+    try:
+        bc.create_append_blob()
+    except ResourceExistsError:
+        pass
+    bc.append_block((text + "\n").encode("utf-8"))
+
+# def jlog(payload: dict, fname: str = "local_metrics.jsonl"):
+#     # append structured line to runs/local_metrics.jsonl
+#     with (RUN_LOG_DIR / fname).open("a", encoding="utf-8") as f:
+#         f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 def jlog(payload: dict, fname: str = "local_metrics.jsonl"):
-    # append structured line to runs/local_metrics.jsonl
-    with (RUN_LOG_DIR / fname).open("a", encoding="utf-8") as f:
-        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    line = json.dumps(payload, ensure_ascii=False)
+    logging.getLogger("activity").info(line)
+    try:
+        with (RUN_LOG_DIR / fname).open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+    # 3) optional: durable Append Blob if configured
+    cont = os.getenv("RUN_LOG_CONTAINER")
+    if cont:
+        try:
+            cc = _bsc().get_container_client(cont)
+            run_id = payload.get("run_id", "unknown")
+            _append_blob_line(cc, f"run_{run_id}.jsonl", line)
+        except Exception as e:
+            logging.getLogger("activity").warning(f"blob-append-log failed: {e}")
 
 def _logger():
     lg = logging.getLogger("activity")
