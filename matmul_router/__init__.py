@@ -14,11 +14,17 @@ MAX_DIM_SINGLE      = int(os.getenv("MAX_DIM_SINGLE", "6144"))     # route big t
 TILE_SIZE           = int(os.getenv("TILE_SIZE", "2048"))          # Durable tile size
 TEMP_CONTAINER      = os.getenv("TEMP_CONTAINER", "temp")          # tiles/partials
 PAD_RATIO_LIMIT     = float(os.getenv("PAD_RATIO_LIMIT", "1.5"))
-RUN_LOG_DIR = "temp/runs"
-def jlog(payload: dict, fname: str = "local_metrics.jsonl"):
-    # append structured line to runs/local_metrics.jsonl
-    with (RUN_LOG_DIR / fname).open("a", encoding="utf-8") as f:
-        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+RUN_LOG_CONTAINER   = os.getenv("RUN_LOG_CONTAINER", OUTPUT_CONTAINER)
+RUN_LOG_PREFIX      = os.getenv("RUN_LOG_PREFIX", "runs/")
+def jlog(payload: dict):
+    line = json.dumps(payload, ensure_ascii=False)
+    logging.getLogger("router").info(line)  # App Insights
+    try:
+        cc = _blob_client().get_container_client(RUN_LOG_CONTAINER)
+        run_id = payload.get("run_id", "unknown")
+        _append_blob_line(cc, f"{RUN_LOG_PREFIX}run_{run_id}.jsonl", line)
+    except Exception as e:
+        logging.getLogger("router").warning(f"blob-append-log failed: {e}")
 
 def _logger():
     lg = logging.getLogger("router")
@@ -48,6 +54,7 @@ def _append_blob_line(cc, name: str, text: str):
     except ResourceExistsError:
         pass
     bc.append_block((text + "\n").encode("utf-8"))
+
 
 async def main(inputBlob: func.InputStream, starter: str):
     # Durable client binding
@@ -117,7 +124,7 @@ async def main(inputBlob: func.InputStream, starter: str):
         reason = "N>MAX_DIM_SINGLE" if N > MAX_DIM_SINGLE else f"pad_ratio>{PAD_RATIO_LIMIT}"
         logger.info(f"Routing to Durable ({reason}).")
 
-        run_id = await client.start_new("orchestrator", None, {
+        instance_id = await client.start_new("orchestrator", None, {
             "input_container": "inputs",
             "input_blob": name.split("/", 1)[-1],
             "temp_container": TEMP_CONTAINER,
@@ -126,7 +133,7 @@ async def main(inputBlob: func.InputStream, starter: str):
             "dtype": "float32" if target_dtype==np.float32 else "float64",
             "strassen_threshold": STRASSEN_THRESHOLD
         })
-        logger.info(f"Started durable instance: {run_id}")
+        logger.info(f"Started durable instance: {instance_id}")
         instance_id = await client.start_new("orchestrator", None, orchestrator_input)
 
         payload = dict(common_ctx)
