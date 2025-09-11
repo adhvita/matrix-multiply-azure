@@ -1,18 +1,31 @@
 import azure.durable_functions as df
-
+try:
+    from shared.logging_utils import jlog  # uses your enriched jlog (profile/phase/op/host_arch)
+except Exception:
+    jlog = None  
 def orchestrator_function(context: df.DurableOrchestrationContext):
     cfg = context.get_input()
     # CHANGE: derive a deterministic run_id (never generate UUIDs in an orchestrator)
     # Prefer the router-provided run_id; otherwise derive from input blob name (deterministic).
-    run_id = cfg.get("run_id") or cfg["input_blob"].rsplit(".", 1)[0]
+    run_id = cfg.get("run_id") or (cfg.get("input_blob", "run_unknown").rsplit(".", 1)[0])
 
     # Optional: surface progress (safe/deterministic)
     # CHANGE: set custom status so you can watch stages in the portal
     context.set_custom_status({"stage": "prepare_tiles", "run_id": run_id})
-
+    if jlog and not context.is_replaying:
+        jlog({
+            "phase": "e2e",
+            "op": "orchestrate_start",
+            "run_id": run_id,
+            "tile_size": tile,
+            "dtype": dtype,
+            "strassen_threshold": thr,
+            "success": True
+        })
     # 1) Pre-split NPZ into tiles (A_i_q.npy, B_q_j.npy)
     manifest = yield context.call_activity("activity_worker", {
         "op": "prepare_tiles",
+        "run_id": run_id, 
         "input_container": cfg["input_container"],
         "input_blob": cfg["input_blob"],
         "temp_container": cfg["temp_container"],
@@ -26,6 +39,7 @@ def orchestrator_function(context: df.DurableOrchestrationContext):
     # 2) Fan-out multiplies (row/col across q) → partials
     # CHANGE: schedule as a PARALLEL wave using task_all (true fan-out)
     context.set_custom_status({"stage": "multiply", "run_id": run_id})
+    
     multiply_tasks = []
     for i in range(tiles):
         for j in range(tiles):
@@ -101,7 +115,20 @@ def orchestrator_function(context: df.DurableOrchestrationContext):
         "output": f"{cfg['output_container']}/{out_blob}",
         "N": N, "tile": tile, "tiles": tiles
     })
-
+    if jlog and not context.is_replaying:
+        jlog({
+            "phase": "e2e",
+            "op": "merge",
+            "run_id": run_id,
+            "count": len(final_tiles),
+            "success": True
+        })
+        jlog({
+            "phase": "e2e",
+            "op": "orchestrate_end",
+            "run_id": run_id,
+            "success": True
+        })
     # CHANGE: return extra metadata (tiles/tile) to help your results scripts
     return {
         "output": f"{cfg['output_container']}/{out_blob}",
@@ -111,7 +138,6 @@ def orchestrator_function(context: df.DurableOrchestrationContext):
         "tiles": tiles,
         "run_id": run_id
     }
-
 
     # # 4) Merge tiles → single C.npy in output container
     # out_blob = yield context.call_activity("activity_worker", {

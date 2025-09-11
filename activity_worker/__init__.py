@@ -3,7 +3,7 @@ import numpy as np
 from azure.storage.blob import BlobServiceClient, ContentSettings
 from azure.core.exceptions import ResourceExistsError
 from shared.strassen_module import strassen_rectangular
-
+_COLD = True
 # ---------- config ----------
 OUTPUT_CONTAINER  = os.getenv("OUTPUT_CONTAINER", "output-container")
 RUN_LOG_CONTAINER = os.getenv("RUN_LOG_CONTAINER", OUTPUT_CONTAINER)  # default to output container
@@ -60,18 +60,31 @@ def _logger():
 
 # ---------- structured run logging ----------
 def jlog(rec: dict):
-    """
-    Append JSON line to 'RUN_LOG_CONTAINER/RUN_LOG_PREFIX/run_<run_id>.jsonl'.
-    - Never touches local disk (safe for Linux Consumption).
-    - Tolerates missing env by catching and warning.
-    """
-    line = json.dumps(rec, ensure_ascii=False)
+    # CHANGE: enrich every record with defaults your summariser expects
+    profile = os.getenv("PROFILE", "profileA")
+    base = {
+        "ts": time.time(),
+        "run_id": rec.get("run_id") or os.getenv("RUN_ID") or f"run_{uuid.uuid4().hex[:8]}",
+        "profile": profile,
+        "phase": rec.get("phase", "e2e"),
+        "op": rec.get("op", "activity"),
+        "host_arch": platform.machine(),  # "arm64" on M2; "x86_64" on cloud
+    }
+    base.update(rec)
+    # CHANGE: normalise duration key
+    if "dur_ms" in base and "duration_ms" not in base:
+        base["duration_ms"] = base["dur_ms"]
+    # default success True if not present
+    base.setdefault("success", True)
+
+    line = json.dumps(base, ensure_ascii=False)
     logging.getLogger("activity").info(line)  # goes to App Insights
 
     try:
         cc = _bsc().get_container_client(RUN_LOG_CONTAINER)
-        run_id = rec.get("run_id", "unknown")
-        name = f"{RUN_LOG_PREFIX}run_{run_id}.jsonl"
+        run_id = base["run_id"]
+        # CHANGE: ensure prefix behaves like a virtual folder
+        name = f"{RUN_LOG_PREFIX.rstrip('/')}/run_{run_id}.jsonl"
         _append_blob_line(cc, name, line)
     except Exception as e:
         logging.getLogger("activity").warning(f"blob-append-log failed: {e}")
@@ -82,7 +95,10 @@ def main(payload: dict) -> dict:
     op = payload.get("op")
     bsc = _bsc()
     run_id = payload.get("run_id") or f"local-{uuid.uuid4()}"
-
+    global _COLD
+    if _COLD:
+        jlog({"op":"activity_cold_start","phase":"e2e","run_id":run_id,"cold_start":True})
+        _COLD = False
     if op == "prepare_tiles":
         icc = bsc.get_container_client(payload["input_container"])
         tcc = bsc.get_container_client(payload["temp_container"])

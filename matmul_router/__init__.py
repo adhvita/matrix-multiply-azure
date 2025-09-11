@@ -5,7 +5,7 @@ import numpy as np
 import uuid, pathlib
 # CHANGE: also import next_pow2 for the pad-ratio guard
 from shared.strassen_module import strassen_rectangular, next_pow2
-
+_COLD = True
 # App settings (can override in Azure)
 OUTPUT_CONTAINER    = os.getenv("OUTPUT_CONTAINER", "output-container")
 DEFAULT_DTYPE       = os.getenv("MM_DTYPE", "float32").lower()     # float32/float64
@@ -16,18 +16,30 @@ TEMP_CONTAINER      = os.getenv("TEMP_CONTAINER", "temp")          # tiles/parti
 PAD_RATIO_LIMIT     = float(os.getenv("PAD_RATIO_LIMIT", "1.5"))
 RUN_LOG_CONTAINER   = os.getenv("RUN_LOG_CONTAINER", OUTPUT_CONTAINER)
 RUN_LOG_PREFIX      = os.getenv("RUN_LOG_PREFIX", "runs/")
+# CHANGE: enrich jlog with defaults: profile, phase, op, host_arch, run_id fallback
 def jlog(payload: dict):
-    line = json.dumps(payload, ensure_ascii=False)
+    import platform
+    profile = os.getenv("PROFILE", "profileA")
+    base = {
+        "ts": time.time(),
+        "run_id": payload.get("run_id") or os.getenv("RUN_ID") or f"run_{uuid.uuid4().hex[:8]}",
+        "profile": profile,
+        "phase": payload.get("phase", "e2e"),
+        "op": payload.get("op", "route"),
+        "host_arch": platform.machine(),  # "arm64" (M2) or "x86_64" (cloud)
+    }
+    base.update(payload)
+
+    line = json.dumps(base, ensure_ascii=False)
     logging.getLogger("router").info(line)  # App Insights
 
-    # append to blob: <RUN_LOG_CONTAINER>/<RUN_LOG_PREFIX>run_<run_id>.jsonl
     try:
-        run_id = payload.get("run_id", "unknown")
         cc = _blob_client().get_container_client(RUN_LOG_CONTAINER)
-        blob_name = f"{RUN_LOG_PREFIX}run_{run_id}.jsonl"
+        blob_name = f"{RUN_LOG_PREFIX}run_{base['run_id']}.jsonl"
         _append_blob_line(cc, blob_name, line)
     except Exception as e:
         logging.getLogger("router").warning(f"blob-append-log failed: {e}")
+
 
 def _logger():
     lg = logging.getLogger("router")
@@ -64,6 +76,12 @@ async def main(inputBlob: func.InputStream, starter: str):
     import azure.durable_functions as df
     client = df.DurableOrchestrationClient(starter)
     logger = _logger()
+    global _COLD
+    if _COLD:
+        jlog({"op":"router_trigger","phase":"e2e","cold_start":True})
+        _COLD = False
+    else:
+        jlog({"op":"router_trigger","phase":"e2e","cold_start":False})
 
     name = inputBlob.name  # e.g., inputs/pair_....npz
     logger.info(f"Triggered by blob: {name} size={inputBlob.length} bytes")
@@ -138,34 +156,55 @@ async def main(inputBlob: func.InputStream, starter: str):
             "strassen_threshold": STRASSEN_THRESHOLD
         })
         logger.info(f"Started durable instance: {instance_id}")
-        instance_id = await client.start_new("orchestrator", None, orchestrator_input)
+        # instance_id = await client.start_new("orchestrator", None, orchestrator_input)
 
-        payload = dict(common_ctx)
-        payload.update({
-            "mode": "durable_start",
+        jlog(dict(common_ctx, **{
+            "phase": "e2e",
+            "op": "route_durable",
+            "route_reason": reason,
             "instance_id": instance_id,
-            "output": None
-        })
-        jlog(payload)                      # local JSONL
-        logger.info(json.dumps(payload))   # cloud trace
+            "success": True
+        }))
 
         logger.info(f"Started durable instance: {instance_id}")
         return
 
     # Inline (single-invocation) path
     logger.info("Routing to inline (single invocation).")
+    jlog(dict(common_ctx, **{"phase":"e2e","op":"route_inline","success":True}))
     t0 = time.time()
     C = strassen_rectangular(A, B, threshold=STRASSEN_THRESHOLD, logger=logger)
     t1 = time.time()
-
+    compute_ms = int((t1 - t0) * 1000)
+    jlog(dict(common_ctx, **{
+        "phase": "e2e",
+        "op": "compute_inline",
+        "duration_ms": compute_ms,
+        "bytes_in": int(A.size * A.itemsize + B.size * B.itemsize),
+        "bytes_out": int(C.size * C.itemsize),
+        "success": True
+    }))
     out_blob = f"C_{N}x{N}_{'float32' if target_dtype==np.float32 else 'float64'}_{t1}.npy"
+    u0 = time.time()
     _upload_npy(out_cc, out_blob, C)
-    
+    u1 = time.time()
+    upload_ms = int((u1 - u0) * 1000)
+    jlog(dict(common_ctx, **{
+        "phase": "e2e",
+        "op": "upload_result",
+        "duration_ms": upload_ms,
+        "output_blob": f"{OUTPUT_CONTAINER}/{out_blob}",
+        "bytes_in": int(C.size * C.itemsize),   # bytes sent to storage
+        "success": True
+    }))
     payload = dict(common_ctx)
     payload.update({
-        "mode": "inline",
-        "compute_sec": round(t1 - t0, 6),
-        "output": f"{OUTPUT_CONTAINER}/{out_blob}"
+        "phase": "e2e",
+        "op": "inline_end",
+        "compute_ms": compute_ms,
+        "upload_ms": upload_ms,
+        "output": f"{OUTPUT_CONTAINER}/{out_blob}",
+        "success": True
     })
     jlog(payload)
     logger.info(json.dumps(payload))
