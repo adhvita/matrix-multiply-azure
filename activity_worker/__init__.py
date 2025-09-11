@@ -68,7 +68,6 @@ def jlog(rec: dict):
         "profile": profile,
         "phase": rec.get("phase", "e2e"),
         "op": rec.get("op", "activity"),
-        "host_arch": platform.machine(),  # "arm64" on M2; "x86_64" on cloud
     }
     base.update(rec)
     # CHANGE: normalise duration key
