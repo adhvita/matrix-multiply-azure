@@ -1,4 +1,4 @@
-import logging, os, io, json, math, pathlib, uuid, time
+import logging, os, io, json, math, uuid, time
 import numpy as np
 from azure.storage.blob import BlobServiceClient, ContentSettings
 from azure.core.exceptions import ResourceExistsError
@@ -19,38 +19,26 @@ def _upload_npy_with_size(cc, name: str, arr: np.ndarray) -> int:
     )
     return len(data)
 
-def _safe_run_dir():
-    p = pathlib.Path(os.getenv("LOCAL_RUN_LOG_DIR") or
-                     ("/temp/runs" if os.getenv("WEBSITE_INSTANCE_ID") else "./runs"))
-    try: p.mkdir(parents=True, exist_ok=True)
-    except Exception: pass
-    return p
-
-RUN_LOG_DIR = _safe_run_dir()
-
 def _append_blob_line(cc, name: str, text: str):
     bc = cc.get_blob_client(name)
-    try: bc.create_append_blob()
-    except ResourceExistsError: pass
+    try:
+        bc.create_append_blob()
+    except ResourceExistsError:
+        pass
     bc.append_block((text + "\n").encode("utf-8"))
 
-def jlog(payload: dict, fname: str = "local_metrics.jsonl"):
+def jlog(payload: dict, *, out_cc, prefix: str = "runs/"):
+    """
+    Append one structured JSON line to an append-blob under:
+        <output_container>/<prefix>/run_<run_id>.jsonl
+    """
     line = json.dumps(payload, ensure_ascii=False)
-    logging.getLogger("activity").info(line)               # App Insights
+    logging.getLogger("activity").info(line)  # surfaces in App Insights
     try:
-        with (RUN_LOG_DIR / fname).open("a", encoding="utf-8") as f:
-            f.write(line + "\n")                           # local fallback
-    except Exception:
-        pass
-    cont = os.getenv("RUN_LOG_CONTAINER")
-    pref = os.getenv("RUN_LOG_PREFIX", "runs/")
-    if cont:
-        try:
-            cc = _bsc().get_container_client(cont)
-            run_id = payload.get("run_id", "unknown")
-            _append_blob_line(cc, f"{pref}run_{run_id}.jsonl", line)
-        except Exception as e:
-            logging.getLogger("activity").warning(f"blob-append-log failed: {e}")
+        run_id = payload.get("run_id", "unknown")
+        _append_blob_line(out_cc, f"{prefix}run_{run_id}.jsonl", line)
+    except Exception as e:
+        logging.getLogger("activity").warning(f"blob-append-log failed: {e}")
 
 def _logger():
     lg = logging.getLogger("activity")
@@ -58,7 +46,9 @@ def _logger():
         h = logging.StreamHandler()
         h.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
         lg.addHandler(h); lg.setLevel(logging.INFO)
-    for v in ["OMP_NUM_THREADS","OPENBLAS_NUM_THREADS","MKL_NUM_THREADS","NUMEXPR_NUM_THREADS","VECLIB_MAXIMUM_THREADS"]:
+    # keep single-threaded BLAS on Functions
+    for v in ["OMP_NUM_THREADS","OPENBLAS_NUM_THREADS","MKL_NUM_THREADS",
+              "NUMEXPR_NUM_THREADS","VECLIB_MAXIMUM_THREADS"]:
         os.environ.setdefault(v, "1")
     return lg
 
@@ -78,6 +68,9 @@ def main(payload: dict) -> dict:
     op = payload.get("op")
     bsc = _bsc()
     run_id = payload.get("run_id") or f"local-{uuid.uuid4()}"
+    # where to write run logs: use *output container*/runs/
+    out_log_cc = bsc.get_container_client(payload["output_container"]) \
+        if "output_container" in payload else None
 
     if op == "prepare_tiles":
         icc = bsc.get_container_client(payload["input_container"])
@@ -86,14 +79,16 @@ def main(payload: dict) -> dict:
         dt = _dtype_of(payload["dtype"])
         dtype_str = "float32" if dt == np.float32 else "float64"
 
-        # FIX: single download (count + load from same bytes)
+        # single download (count + load)
         t0 = time.time(); bytes_in = 0; bytes_out = 0
         raw, nbytes = _download_blob_bytes(icc, payload["input_blob"])
         bytes_in += nbytes
-        npz = np.load(io.BytesIO(raw))                     # reuse raw bytes
+        npz = np.load(io.BytesIO(raw))
 
-        if not ("A" in npz and "B" in npz): raise ValueError("NPZ missing A,B")
-        A = np.array(npz["A"], copy=False); B = np.array(npz["B"], copy=False)
+        if not ("A" in npz and "B" in npz):
+            raise ValueError("NPZ missing A,B")
+        A = np.array(npz["A"], copy=False)
+        B = np.array(npz["B"], copy=False)
         if A.shape != B.shape or A.ndim != 2 or A.shape[0] != A.shape[1]:
             raise ValueError(f"Invalid shapes: A{A.shape} B{B.shape}")
 
@@ -108,7 +103,7 @@ def main(payload: dict) -> dict:
         tiles = math.ceil(N / tile)
         logger.info(f"prepare_tiles: N={N}, dtype={dtype_str}, tile={tile}, tiles_per_side={tiles}")
 
-        # write tiles (count bytes_out)
+        # write tiles (bytes_out accounted)
         for i in range(tiles):
             r0 = i*tile; r1 = min((i+1)*tile, N)
             for q in range(tiles):
@@ -125,9 +120,10 @@ def main(payload: dict) -> dict:
                 T[:(r1-r0), :(c1-c0)] = B[r0:r1, c0:c1]
                 bytes_out += _upload_npy_with_size(tcc, f"B_{q}_{j}.npy", T)
 
-        # manifest (optional)
-        bytes_out += _upload_npy_with_size(tcc, "manifest.npy",
-                                           np.array([N, tile, tiles], dtype=np.int64))
+        # manifest
+        bytes_out += _upload_npy_with_size(
+            tcc, "manifest.npy", np.array([N, tile, tiles], dtype=np.int64)
+        )
 
         t1 = time.time()
         rec = {
@@ -136,7 +132,7 @@ def main(payload: dict) -> dict:
             "bytes_in": int(bytes_in), "bytes_out": int(bytes_out),
             "dur_ms": int((t1 - t0) * 1000)
         }
-        jlog(rec, fname=f"run_{run_id}.jsonl")
+        if out_log_cc: jlog(rec, out_cc=out_log_cc)
         return {"N": N, "tile": tile, "tiles": tiles}
 
     elif op == "multiply_tile_rowcol":
@@ -151,7 +147,7 @@ def main(payload: dict) -> dict:
         for q in range(tiles):
             Aiq = _load_npy_from_blob(tcc, f"A_{i}_{q}.npy")
             Bqj = _load_npy_from_blob(tcc, f"B_{q}_{j}.npy")
-            bytes_in += int(Aiq.nbytes + Bqj.nbytes)       # FIX: count reads
+            bytes_in += int(Aiq.nbytes + Bqj.nbytes)
 
             if tile <= thr:
                 Cpart = Aiq.dot(Bqj)
@@ -161,8 +157,8 @@ def main(payload: dict) -> dict:
                 Cpart = strassen_rectangular(Aiq, Bqj, threshold=thr, logger=dummy)
 
             p = f"partials/part_{i}_{q}_{j}.npy"
-            bytes_out += _upload_npy_with_size(tcc, p, Cpart.astype(dt, copy=False))  # FIX: single uploader
-            partials.append(p)                                                        # FIX: append once
+            bytes_out += _upload_npy_with_size(tcc, p, Cpart.astype(dt, copy=False))
+            partials.append(p)
 
         t1 = time.time()
         rec = {
@@ -171,7 +167,7 @@ def main(payload: dict) -> dict:
             "bytes_in": int(bytes_in), "bytes_out": int(bytes_out),
             "dur_ms": int((t1 - t0) * 1000)
         }
-        jlog(rec, fname=f"run_{run_id}.jsonl")
+        if out_log_cc: jlog(rec, out_cc=out_log_cc)
         return {"i": i, "j": j, "partials": partials}
 
     elif op == "reduce_partials":
@@ -184,11 +180,11 @@ def main(payload: dict) -> dict:
         acc = None
         for p in payload["partials"]:
             Cpart = _load_npy_from_blob(tcc, p)
-            bytes_in += int(Cpart.nbytes)                 # FIX: count reads
+            bytes_in += int(Cpart.nbytes)
             acc = Cpart if acc is None else (acc + Cpart)
 
         out_name = f"C_{i}_{j}.npy"
-        bytes_out += _upload_npy_with_size(tcc, out_name, acc.astype(dt, copy=False)) # FIX: single uploader
+        bytes_out += _upload_npy_with_size(tcc, out_name, acc.astype(dt, copy=False))
 
         t1 = time.time()
         rec = {
@@ -197,7 +193,7 @@ def main(payload: dict) -> dict:
             "bytes_in": int(bytes_in), "bytes_out": int(bytes_out),
             "dur_ms": int((t1 - t0) * 1000)
         }
-        jlog(rec, fname=f"run_{run_id}.jsonl")
+        if out_log_cc: jlog(rec, out_cc=out_log_cc)
         return {"i": i, "j": j, "tile": tile, "name": out_name}
 
     elif op == "merge_tiles":
@@ -213,14 +209,13 @@ def main(payload: dict) -> dict:
             for j in range(tiles):
                 c0 = j*tile; c1 = min((j+1)*tile, N)
                 Tij = _load_npy_from_blob(tcc, f"C_{i}_{j}.npy")
-                bytes_in += int(Tij.nbytes)               # FIX: count reads
+                bytes_in += int(Tij.nbytes)
                 C[r0:r1, c0:c1] = Tij[:(r1-r0), :(c1-c0)]
 
         out_blob = f"C_{N}x{N}_{dtype_str}.npy"
-        bytes_out += _upload_npy_with_size(occ, out_blob, C)  # FIX: single uploader
+        bytes_out += _upload_npy_with_size(occ, out_blob, C)
 
         t1 = time.time()
-        # compact summary + durable_done
         rec = {
             "ts": time.time(), "run_id": run_id, "op": "merge_tiles",
             "N": N, "tile": tile, "tiles": tiles, "dtype": dtype_str,
@@ -228,7 +223,8 @@ def main(payload: dict) -> dict:
             "dur_ms": int((t1 - t0) * 1000),
             "output": out_blob
         }
-        jlog(rec, fname=f"run_{run_id}.jsonl")
+        # write to output-container/runs/...
+        jlog(rec, out_cc=occ)   # use the *output* container for run logs
         return out_blob
 
     else:

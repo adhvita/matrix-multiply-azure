@@ -13,16 +13,12 @@ STRASSEN_THRESHOLD  = int(os.getenv("STRASSEN_THRESHOLD", "1024")) # high crosso
 MAX_DIM_SINGLE      = int(os.getenv("MAX_DIM_SINGLE", "6144"))     # route big to Durable
 TILE_SIZE           = int(os.getenv("TILE_SIZE", "2048"))          # Durable tile size
 TEMP_CONTAINER      = os.getenv("TEMP_CONTAINER", "temp")          # tiles/partials
-
-RUN_LOG_DIR = pathlib.Path(os.getenv("LOCAL_RUN_LOG_DIR", "./runs"))
-RUN_LOG_DIR.mkdir(parents=True, exist_ok=True)
+PAD_RATIO_LIMIT     = float(os.getenv("PAD_RATIO_LIMIT", "1.5"))
+RUN_LOG_DIR = "temp/runs"
 def jlog(payload: dict, fname: str = "local_metrics.jsonl"):
     # append structured line to runs/local_metrics.jsonl
     with (RUN_LOG_DIR / fname).open("a", encoding="utf-8") as f:
         f.write(json.dumps(payload, ensure_ascii=False) + "\n")
-
-# CHANGE: read PAD_RATIO_LIMIT from env (used later, inside main)
-PAD_RATIO_LIMIT     = float(os.getenv("PAD_RATIO_LIMIT", "1.5"))
 
 def _logger():
     lg = logging.getLogger("router")
@@ -43,6 +39,15 @@ def _upload_npy(cc, name: str, arr: np.ndarray):
     buf = io.BytesIO(); np.save(buf, arr); buf.seek(0)
     cc.upload_blob(name, buf.getvalue(), overwrite=True,
                    content_settings=ContentSettings(content_type="application/octet-stream"))
+
+def _append_blob_line(cc, name: str, text: str):
+    from azure.core.exceptions import ResourceExistsError
+    bc = cc.get_blob_client(name)
+    try:
+        bc.create_append_blob()
+    except ResourceExistsError:
+        pass
+    bc.append_block((text + "\n").encode("utf-8"))
 
 async def main(inputBlob: func.InputStream, starter: str):
     # Durable client binding
