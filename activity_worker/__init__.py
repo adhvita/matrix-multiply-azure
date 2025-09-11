@@ -4,7 +4,15 @@ from azure.storage.blob import BlobServiceClient, ContentSettings
 from azure.core.exceptions import ResourceExistsError
 from shared.strassen_module import strassen_rectangular
 
-# ---------- helpers ----------
+# ---------- config ----------
+OUTPUT_CONTAINER  = os.getenv("OUTPUT_CONTAINER", "output-container")
+RUN_LOG_CONTAINER = os.getenv("RUN_LOG_CONTAINER", OUTPUT_CONTAINER)  # default to output container
+RUN_LOG_PREFIX    = os.getenv("RUN_LOG_PREFIX", "runs/")              # e.g., runs/run_<id>.jsonl
+
+# ---------- blob + io helpers ----------
+def _bsc():
+    return BlobServiceClient.from_connection_string(os.environ["AzureWebJobsStorage"])
+
 def _download_blob_bytes(cc, name: str):
     data = cc.get_blob_client(name).download_blob().readall()
     return data, len(data)
@@ -14,57 +22,21 @@ def _upload_npy_with_size(cc, name: str, arr: np.ndarray) -> int:
     np.save(buf, arr, allow_pickle=False)
     data = buf.getvalue()
     cc.upload_blob(
-        name, data, overwrite=True,
+        name,
+        data,
+        overwrite=True,
         content_settings=ContentSettings(content_type="application/octet-stream"),
     )
     return len(data)
 
-def _append_blob_line(cc, name: str, text: str):
-    bc = cc.get_blob_client(name)
-    try:
-        bc.create_append_blob()
-    except ResourceExistsError:
-        pass
-    bc.append_block((text + "\n").encode("utf-8"))
-OUTPUT_CONTAINER    = os.getenv("OUTPUT_CONTAINER", "output-container")
-RUN_LOG_CONTAINER   = os.getenv("RUN_LOG_CONTAINER", OUTPUT_CONTAINER)
-RUN_LOG_PREFIX      = os.getenv("RUN_LOG_PREFIX", "runs/")
-def _bsc():
-    return BlobServiceClient.from_connection_string(os.environ["AzureWebJobsStorage"])
-
-def jlog(rec: dict, **_ignored):
-    line = json.dumps(rec, ensure_ascii=False)
-    logging.info(line)  # App Insights
-    try:
-        _append_blob_line(_bsc, RUN_LOG_CONTAINER, f"{RUN_LOG_PREFIX}run_{run_id}.jsonl", line)
-    except Exception as e:
-        logging.warning(f"blob-append-log failed: {e}")
-
-def _logger():
-    lg = logging.getLogger("activity")
-    if not lg.handlers:
-        h = logging.StreamHandler()
-        h.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
-        lg.addHandler(h); lg.setLevel(logging.INFO)
-    # keep single-threaded BLAS on Functions
-    for v in ["OMP_NUM_THREADS","OPENBLAS_NUM_THREADS","MKL_NUM_THREADS",
-              "NUMEXPR_NUM_THREADS","VECLIB_MAXIMUM_THREADS"]:
-        os.environ.setdefault(v, "1")
-    return lg
-
-def _append_blob_line(bsc, container: str, blobname: str, text: str):
-    # CHANGED: write logs to an AppendBlob in *output* storage only
-    from azure.core.exceptions import ResourceExistsError
-    cc = bsc.get_container_client(container)
+def _append_blob_line(cc, blobname: str, text: str):
+    """Append one line to an AppendBlob, creating it if needed."""
     bc = cc.get_blob_client(blobname)
     try:
         bc.create_append_blob()
     except ResourceExistsError:
         pass
     bc.append_block((text + "\n").encode("utf-8"))
-
-def _bsc():
-    return BlobServiceClient.from_connection_string(os.environ["AzureWebJobsStorage"])
 
 def _load_npy_from_blob(cc, name, allow_pickle=False):
     data = cc.get_blob_client(name).download_blob().readall()
@@ -73,15 +45,43 @@ def _load_npy_from_blob(cc, name, allow_pickle=False):
 def _dtype_of(s: str):
     return np.float32 if s == "float32" else np.float64
 
+def _logger():
+    lg = logging.getLogger("activity")
+    if not lg.handlers:
+        h = logging.StreamHandler()
+        h.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+        lg.addHandler(h)
+        lg.setLevel(logging.INFO)
+    # keep single-threaded BLAS on Functions
+    for v in ["OMP_NUM_THREADS","OPENBLAS_NUM_THREADS","MKL_NUM_THREADS",
+              "NUMEXPR_NUM_THREADS","VECLIB_MAXIMUM_THREADS"]:
+        os.environ.setdefault(v, "1")
+    return lg
+
+# ---------- structured run logging ----------
+def jlog(rec: dict):
+    """
+    Append JSON line to 'RUN_LOG_CONTAINER/RUN_LOG_PREFIX/run_<run_id>.jsonl'.
+    - Never touches local disk (safe for Linux Consumption).
+    - Tolerates missing env by catching and warning.
+    """
+    line = json.dumps(rec, ensure_ascii=False)
+    logging.getLogger("activity").info(line)  # goes to App Insights
+
+    try:
+        cc = _bsc().get_container_client(RUN_LOG_CONTAINER)
+        run_id = rec.get("run_id", "unknown")
+        name = f"{RUN_LOG_PREFIX}run_{run_id}.jsonl"
+        _append_blob_line(cc, name, line)
+    except Exception as e:
+        logging.getLogger("activity").warning(f"blob-append-log failed: {e}")
+
 # ---------- main ----------
 def main(payload: dict) -> dict:
     logger = _logger()
     op = payload.get("op")
     bsc = _bsc()
     run_id = payload.get("run_id") or f"local-{uuid.uuid4()}"
-    # where to write run logs: use *output container*/runs/
-    out_log_cc = bsc.get_container_client(payload["output_container"]) \
-        if "output_container" in payload else None
 
     if op == "prepare_tiles":
         icc = bsc.get_container_client(payload["input_container"])
@@ -143,7 +143,7 @@ def main(payload: dict) -> dict:
             "bytes_in": int(bytes_in), "bytes_out": int(bytes_out),
             "dur_ms": int((t1 - t0) * 1000)
         }
-        if out_log_cc: jlog(rec, out_cc=out_log_cc)
+        jlog(rec)
         return {"N": N, "tile": tile, "tiles": tiles}
 
     elif op == "multiply_tile_rowcol":
@@ -178,7 +178,7 @@ def main(payload: dict) -> dict:
             "bytes_in": int(bytes_in), "bytes_out": int(bytes_out),
             "dur_ms": int((t1 - t0) * 1000)
         }
-        if out_log_cc: jlog(rec, out_cc=out_log_cc)
+        jlog(rec)
         return {"i": i, "j": j, "partials": partials}
 
     elif op == "reduce_partials":
@@ -204,7 +204,7 @@ def main(payload: dict) -> dict:
             "bytes_in": int(bytes_in), "bytes_out": int(bytes_out),
             "dur_ms": int((t1 - t0) * 1000)
         }
-        if out_log_cc: jlog(rec, out_cc=out_log_cc)
+        jlog(rec)
         return {"i": i, "j": j, "tile": tile, "name": out_name}
 
     elif op == "merge_tiles":
@@ -223,7 +223,7 @@ def main(payload: dict) -> dict:
                 bytes_in += int(Tij.nbytes)
                 C[r0:r1, c0:c1] = Tij[:(r1-r0), :(c1-c0)]
         t1 = time.time()
-        out_blob = f"C_{N}x{N}_{dtype_str}_{t1}.npy"
+        out_blob = f"C_{N}x{N}_{dtype_str}_{int(t1)}.npy"
         bytes_out += _upload_npy_with_size(occ, out_blob, C)
 
         rec = {
@@ -233,8 +233,7 @@ def main(payload: dict) -> dict:
             "dur_ms": int((t1 - t0) * 1000),
             "output": out_blob
         }
-        # write to output-container/runs/...
-        jlog(rec, out_cc=occ)   # use the *output* container for run logs
+        jlog(rec)   # logs to RUN_LOG_CONTAINER/RUN_LOG_PREFIX by env
         return out_blob
 
     else:
