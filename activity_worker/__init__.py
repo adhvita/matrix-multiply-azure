@@ -29,14 +29,16 @@ def _append_blob_line(cc, name: str, text: str):
 OUTPUT_CONTAINER    = os.getenv("OUTPUT_CONTAINER", "output-container")
 RUN_LOG_CONTAINER   = os.getenv("RUN_LOG_CONTAINER", OUTPUT_CONTAINER)
 RUN_LOG_PREFIX      = os.getenv("RUN_LOG_PREFIX", "runs/")
+def _bsc():
+    return BlobServiceClient.from_connection_string(os.environ["AzureWebJobsStorage"])
 
-def jlog(rec: dict):
+def jlog(rec: dict, **_ignored):
     line = json.dumps(rec, ensure_ascii=False)
-    log.info(line)  # App Insights
+    logging.info(line)  # App Insights
     try:
-        _append_blob_line(bsc, RUN_LOG_CONTAINER, f"{RUN_LOG_PREFIX}run_{run_id}.jsonl", line)
+        _append_blob_line(_bsc, RUN_LOG_CONTAINER, f"{RUN_LOG_PREFIX}run_{run_id}.jsonl", line)
     except Exception as e:
-        log.warning(f"blob-append-log failed: {e}")
+        logging.warning(f"blob-append-log failed: {e}")
 
 def _logger():
     lg = logging.getLogger("activity")
