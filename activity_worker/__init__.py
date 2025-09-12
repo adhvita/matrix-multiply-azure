@@ -1,5 +1,6 @@
 import logging, os, io, json, math, uuid, time
 import numpy as np
+import platform
 from azure.storage.blob import BlobServiceClient, ContentSettings
 from azure.core.exceptions import ResourceExistsError
 from shared.strassen_module import strassen_rectangular
@@ -68,6 +69,7 @@ def jlog(rec: dict):
         "profile": profile,
         "phase": rec.get("phase", "e2e"),
         "op": rec.get("op", "activity"),
+        "host_arch": platform.machine()
     }
     base.update(rec)
     # CHANGE: normalise duration key
@@ -153,10 +155,11 @@ def main(payload: dict) -> dict:
 
         t1 = time.time()
         rec = {
-            "ts": time.time(), "run_id": run_id, "op": "prepare_tiles",
+            "ts": time.time(), "run_id": run_id, "phase": "e2e", "op": "prepare_tiles",
             "N": N, "tile": tile, "tiles": tiles, "dtype": dtype_str,
             "bytes_in": int(bytes_in), "bytes_out": int(bytes_out),
-            "dur_ms": int((t1 - t0) * 1000)
+            "duration_ms": int((t1 - t0) * 1000),
+            "success": True
         }
         jlog(rec)
         return {"N": N, "tile": tile, "tiles": tiles}
@@ -188,10 +191,11 @@ def main(payload: dict) -> dict:
 
         t1 = time.time()
         rec = {
-            "ts": time.time(), "run_id": run_id, "op": "multiply_tile_rowcol",
+            "ts": time.time(), "run_id": run_id, "phase": "e2e", "op": "multiply_tile_rowcol",
             "N": int(payload.get("N", tiles * tile)), "tile": tile, "i": i, "j": j, "dtype": dtype_str,
             "bytes_in": int(bytes_in), "bytes_out": int(bytes_out),
-            "dur_ms": int((t1 - t0) * 1000)
+            "duration_ms": int((t1 - t0) * 1000),
+            "success": True
         }
         jlog(rec)
         return {"i": i, "j": j, "partials": partials}
@@ -214,10 +218,11 @@ def main(payload: dict) -> dict:
 
         t1 = time.time()
         rec = {
-            "ts": time.time(), "run_id": run_id, "op": "reduce_partials",
+            "ts": time.time(), "run_id": run_id, "phase": "e2e", "op": "reduce_partials",
             "N": int(payload.get("N", 0)), "tile": tile, "i": i, "j": j, "dtype": dtype_str,
             "bytes_in": int(bytes_in), "bytes_out": int(bytes_out),
-            "dur_ms": int((t1 - t0) * 1000)
+            "duration_ms": int((t1 - t0) * 1000),
+            "success": True
         }
         jlog(rec)
         return {"i": i, "j": j, "tile": tile, "name": out_name}
@@ -242,12 +247,14 @@ def main(payload: dict) -> dict:
         bytes_out += _upload_npy_with_size(occ, out_blob, C)
 
         rec = {
-            "ts": time.time(), "run_id": run_id, "op": "merge_tiles",
+            "ts": time.time(), "run_id": run_id, "phase": "e2e", "op": "merge_tiles",
             "N": N, "tile": tile, "tiles": tiles, "dtype": dtype_str,
             "bytes_in": int(bytes_in), "bytes_out": int(bytes_out),
-            "dur_ms": int((t1 - t0) * 1000),
-            "output": out_blob
+            "duration_ms": int((t1 - t0) * 1000),
+            "output": out_blob,
+            "success": True
         }
+
         jlog(rec)   # logs to RUN_LOG_CONTAINER/RUN_LOG_PREFIX by env
         return out_blob
 
