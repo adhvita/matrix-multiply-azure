@@ -77,11 +77,9 @@ async def main(inputBlob: func.InputStream, starter: str):
     client = df.DurableOrchestrationClient(starter)
     logger = _logger()
     global _COLD
+    cold = _COLD
     if _COLD:
-        jlog({"op":"router_trigger","phase":"e2e","cold_start":True})
         _COLD = False
-    else:
-        jlog({"op":"router_trigger","phase":"e2e","cold_start":False})
 
     name = inputBlob.name  # e.g., inputs/pair_....npz
     logger.info(f"Triggered by blob: {name} size={inputBlob.length} bytes")
@@ -113,6 +111,17 @@ async def main(inputBlob: func.InputStream, starter: str):
         run_id = str(uuid.uuid4())      
 
     # CHANGE: compute pad ratio *after* we know N
+    jlog({"op":"router_trigger","phase":"e2e","run_id": run_id, "cold_start": cold})
+
+    # Also log the input fact so E2E has a clear start timestamp
+    jlog({
+        "phase": "e2e",
+        "op": "trigger_input",
+        "run_id": run_id,
+        "blob": name,
+        "bytes_in": int(inputBlob.length),
+        "success": True
+    })
     P = next_pow2(N)
     pad_ratio = P / float(N)
     common_ctx = {
@@ -165,8 +174,6 @@ async def main(inputBlob: func.InputStream, starter: str):
             "instance_id": instance_id,
             "success": True
         }))
-
-        logger.info(f"Started durable instance: {instance_id}")
         return
 
     # Inline (single-invocation) path
@@ -184,7 +191,7 @@ async def main(inputBlob: func.InputStream, starter: str):
         "bytes_out": int(C.size * C.itemsize),
         "success": True
     }))
-    out_blob = f"C_{N}x{N}_{'float32' if target_dtype==np.float32 else 'float64'}_{t1}.npy"
+    out_blob = f"C_{N}x{N}_{'float32' if target_dtype==np.float32 else 'float64'}_{int{t1}}.npy"
     u0 = time.time()
     _upload_npy(out_cc, out_blob, C)
     u1 = time.time()
