@@ -1,5 +1,10 @@
-azure-functions==1.18.0
+azure-functions==1.20.0
+opencv-python-headless==4.10.0.84
 azure-functions-durable==1.2.9
-azure-storage-blob==12.16.0
-cryptography==43.0.3
+requests
 numpy==1.26.4
+onnxruntime==1.17.1
+async-timeout
+imageio==2.34.1
+imageio-ffmpeg==0.4.9
+azure-storage-blob==12.19.0
